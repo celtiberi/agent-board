@@ -450,6 +450,107 @@ def install_local_agent_profile(
     return out
 
 
+def bind_antigravity_conversation(
+    *,
+    client: httpx.Client,
+    handle: str,
+    board_slug: str,
+    conversation_id: str,
+    webhook_url_override: str | None = None,
+) -> dict[str, Any]:
+    """Bind one board slug to one Antigravity conversation ID and configure push subscription."""
+    clean_handle = handle.strip().lower()
+    clean_board = board_slug.strip().lower()
+    clean_conv = conversation_id.strip()
+    if not clean_conv:
+        typer.echo("Error: conversation ID is required", err=True)
+        raise typer.Exit(1)
+
+    cfg_dir = Path("~/.config/agent-board").expanduser()
+    hook_path = cfg_dir / "webhook.toml"
+    if not hook_path.exists():
+        typer.echo(f"Missing {hook_path}: configure the local webhook listener first.", err=True)
+        raise typer.Exit(1)
+
+    hook_cfg = tomllib.loads(hook_path.read_text(encoding="utf-8"))
+    bearer_token = str(hook_cfg.get("bearer_token", "")).strip()
+    hmac_secret = str(hook_cfg.get("hmac_secret", "")).strip()
+    target_url = (webhook_url_override or str(hook_cfg.get("webhook_url", ""))).strip()
+    if not target_url:
+        typer.echo(f"Missing webhook_url in {hook_path} and --webhook-url was not provided.", err=True)
+        raise typer.Exit(1)
+
+    subs_data = _check_resp(client.get("/subscriptions", params={"all": "true"}))
+    for s in subs_data.get("subscriptions", []):
+        if s.get("principal_handle") == clean_handle and (
+            clean_board in s.get("boards", []) or s.get("url") == target_url
+        ):
+            _check_resp(client.delete(f"/subscriptions/{s['id']}"))
+
+    sub_data = _check_resp(
+        client.post(
+            "/subscriptions",
+            json={
+                "principal_handle": clean_handle,
+                "url": target_url,
+                "boards": [clean_board],
+                "filter": {
+                    "exclude_self": True,
+                    "mentions_only": False,
+                    "types": ["task", "question", "issue", "decision", "retest_report", "status"],
+                },
+                "auth_header": f"Bearer {bearer_token}",
+                "hmac_secret": hmac_secret,
+                "min_interval_s": 30,
+                "debounce_s": 5,
+            },
+        )
+    )
+    test_res = _check_resp(client.post(f"/subscriptions/{sub_data['id']}/test"))
+
+    active_path = cfg_dir / "active_conversations.json"
+    cfg_dir.mkdir(parents=True, exist_ok=True)
+    mapping: dict[str, Any] = {}
+    if active_path.exists():
+        mapping = json.loads(active_path.read_text(encoding="utf-8"))
+    mapping[clean_board] = {
+        "conversation_id": clean_conv,
+        "handle": clean_handle,
+        "subscription_id": sub_data["id"],
+    }
+    active_path.write_text(json.dumps(mapping, indent=2) + "\n", encoding="utf-8")
+    os.chmod(active_path, 0o600)
+
+    return {
+        "board": clean_board,
+        "handle": clean_handle,
+        "conversation_id": clean_conv,
+        "subscription_id": sub_data["id"],
+        "webhook_url": target_url,
+        "webhook_test": test_res,
+        "active_conversations_path": str(active_path),
+    }
+
+
+@admin_cli.command("bind-antigravity")
+def admin_bind_antigravity(
+    handle: str = typer.Argument(...),
+    board: str = typer.Option(..., "--board", "-b", help="Board slug to route."),
+    conversation: str = typer.Option(..., "--conversation", "-c", help="Existing Antigravity conversation ID."),
+    webhook_url: str | None = typer.Option(None, "--webhook-url", help="Override webhook URL from webhook.toml."),
+) -> None:
+    """Bind one board to one Antigravity conversation ID and wire its push webhook."""
+    with _client() as c:
+        res = bind_antigravity_conversation(
+            client=c,
+            handle=handle,
+            board_slug=board,
+            conversation_id=conversation,
+            webhook_url_override=webhook_url,
+        )
+    typer.echo(json.dumps(res, indent=2))
+
+
 @admin_cli.command("onboard")
 def admin_onboard(
     handle: str = typer.Argument(...),
@@ -457,6 +558,12 @@ def admin_onboard(
     target: str = typer.Option("remote", "--target", "-t", help="Target runtime: remote, antigravity, or local."),
     name: str | None = typer.Option(None, "--name", help="Display name if creating principal."),
     role: str = typer.Option("agent", "--role", help="Role: agent, readonly, or owner."),
+    conversation: str | None = typer.Option(
+        None,
+        "--conversation",
+        "-c",
+        help="Optional Antigravity conversation ID to bind for push wakes (used with --target antigravity).",
+    ),
     webhook_url: str | None = typer.Option(None, "--webhook-url", help="Optional routine/webhook URL."),
     webhook_auth: str | None = typer.Option(None, "--webhook-auth", help="Optional webhook Authorization header."),
     skip_notes: bool = typer.Option(
@@ -493,6 +600,14 @@ def admin_onboard(
 
     with _client() as c:
         data = _check_resp(c.post("/admin/onboard", json=payload))
+        if clean_target == "antigravity" and conversation and len(clean_boards) == 1:
+            data["antigravity_binding"] = bind_antigravity_conversation(
+                client=c,
+                handle=data["principal_handle"],
+                board_slug=clean_boards[0],
+                conversation_id=conversation,
+                webhook_url_override=webhook_url,
+            )
 
     local_info: dict[str, str] | None = None
     if clean_target in ("antigravity", "local"):

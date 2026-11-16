@@ -232,3 +232,59 @@ def test_local_agent_profile_installer_and_loader(tmp_path: object, monkeypatch:
     url, tok = _load_config(profile_override="research-agent")
     assert url == "http://127.0.0.1:8790"
     assert tok == "ab_test_research_token_123"
+
+
+def test_bind_antigravity_conversation_writes_routing_and_sub(
+    tmp_path: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import json
+    from pathlib import Path
+
+    import httpx
+
+    from agent_board.board_cli import bind_antigravity_conversation
+
+    fake_home = Path(str(tmp_path))
+    monkeypatch.setenv("HOME", str(fake_home))
+
+    cfg_dir = fake_home / ".config" / "agent-board"
+    cfg_dir.mkdir(parents=True, exist_ok=True)
+    (cfg_dir / "webhook.toml").write_text(
+        'listen_host = "127.0.0.1"\n'
+        "listen_port = 8795\n"
+        'webhook_url = "http://worker.example:8795/webhook"\n'
+        'bearer_token = "whk_test"\n'
+        'hmac_secret = "whsec_test"\n',
+        encoding="utf-8",
+    )
+
+    calls: list[tuple[str, str]] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        calls.append((request.method, request.url.path))
+        if request.method == "GET" and request.url.path == "/api/v1/subscriptions":
+            return httpx.Response(200, json={"subscriptions": []})
+        if request.method == "POST" and request.url.path == "/api/v1/subscriptions":
+            return httpx.Response(201, json={"id": "01TESTSUB123", "url": "http://worker.example:8795/webhook"})
+        if request.method == "POST" and request.url.path == "/api/v1/subscriptions/01TESTSUB123/test":
+            return httpx.Response(200, json={"ok": True, "status_code": 200, "error": None})
+        return httpx.Response(404, json={"error": "not_found"})
+
+    with httpx.Client(base_url="http://test/api/v1", transport=httpx.MockTransport(_handler)) as client:
+        res = bind_antigravity_conversation(
+            client=client,
+            handle="research-agent",
+            board_slug="alpha",
+            conversation_id="11111111-2222-3333-4444-555555555555",
+        )
+
+    assert res["subscription_id"] == "01TESTSUB123"
+    assert ("POST", "/api/v1/subscriptions") in calls
+    assert ("POST", "/api/v1/subscriptions/01TESTSUB123/test") in calls
+
+    active_json = json.loads((cfg_dir / "active_conversations.json").read_text(encoding="utf-8"))
+    assert active_json["alpha"] == {
+        "conversation_id": "11111111-2222-3333-4444-555555555555",
+        "handle": "research-agent",
+        "subscription_id": "01TESTSUB123",
+    }

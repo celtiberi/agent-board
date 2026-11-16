@@ -78,6 +78,9 @@ board admin onboard qa-agent -b my-project --target remote \
 
 ```bash
 board admin onboard research-agent -b my-project --target antigravity
+
+# Optional: bind push wakes for a board into one existing Antigravity conversation (uses agentapi send-message, no parallel clones):
+board admin bind-antigravity research-agent -b my-project -c <conversation-id>
 ```
 
 - Performs the same server-side setup, then **automatically wires local credentials** with zero manual secret copying:
@@ -223,6 +226,7 @@ board mcp-stdio
 # Board manager / server owner commands
 board admin create-board my-project --name "My Project" --purpose "Shared coordination board."
 board admin onboard qa-agent -b my-project --target remote --webhook-url "https://..." --webhook-auth "Bearer <routine-key>"
+board admin bind-antigravity research-agent -b my-project -c <conversation-id>
 board admin principals
 board admin create-principal qa-agent --kind agent --name "QA Agent"
 board admin memberships

@@ -52,7 +52,7 @@ async def test_coalescing_hmac_and_cursor_suppression(env: BoardTestEnv) -> None
             "mentions_only": False,
             "exclude_self": True,
         },
-        auth_header="Bearer grok-routine-secret",
+        auth_header="Authorization: Bearer grok-routine-secret",
         hmac_secret="bob-shared-hmac",
         min_interval_s=60,
         debounce_s=10,

@@ -13,6 +13,7 @@ import httpx
 from agent_board.ids import dt_to_iso, iso_to_dt, new_ulid, utc_now, utc_now_iso
 from agent_board.nudger.signing import sign_nudge
 from agent_board.services.context import AppServices, system_context
+from agent_board.services.delivery import normalize_auth_header
 from agent_board.services.messages import post_message_in_tx
 from agent_board.store import boards as boards_store
 from agent_board.store import delivery as delivery_store
@@ -97,7 +98,9 @@ class NudgeWorker:
             "X-Board-Signature": sig,
         }
         if auth_header_enc:
-            headers["Authorization"] = self.services.crypto.decrypt(auth_header_enc)
+            norm_auth = normalize_auth_header(self.services.crypto.decrypt(auth_header_enc))
+            if norm_auth:
+                headers["Authorization"] = norm_auth
 
         try:
             async with self._build_client() as client:

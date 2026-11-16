@@ -146,6 +146,16 @@ def enqueue_outbox_for_message(
         )
 
 
+def normalize_auth_header(raw: str | None) -> str | None:
+    """Strip surrounding whitespace and any accidental leading 'Authorization:' header name."""
+    if raw is None:
+        return None
+    val = raw.strip()
+    if val.lower().startswith("authorization:"):
+        val = val.split(":", 1)[1].strip()
+    return val or None
+
+
 def _validate_webhook_url(url: str) -> str:
     parsed = urlparse(url.strip())
     if parsed.scheme not in ("http", "https") or not parsed.netloc:
@@ -194,6 +204,7 @@ def create_subscription(
     clean_filter.setdefault("exclude_self", True)
     clean_filter.setdefault("mentions_only", False)
 
+    clean_auth_header = normalize_auth_header(auth_header)
     secret_plain = hmac_secret or f"whsec_{secrets.token_urlsafe(32)}"
 
     with services.db.write_tx() as conn:
@@ -201,7 +212,7 @@ def create_subscription(
         def _do() -> dict[str, Any]:
             now_iso = utc_now_iso()
             sub_id = new_ulid()
-            auth_enc = services.crypto.encrypt(auth_header) if auth_header else None
+            auth_enc = services.crypto.encrypt(clean_auth_header) if clean_auth_header else None
             hmac_enc = services.crypto.encrypt(secret_plain)
             delivery_store.insert_subscription(
                 conn,

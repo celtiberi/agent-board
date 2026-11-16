@@ -14,6 +14,7 @@ from agent_board.http.models import (
     CreatePrincipalRequest,
     CreateSubscriptionRequest,
     CreateTokenRequest,
+    OnboardAgentRequest,
     OpenIssueRequest,
     RecordDecisionRequest,
     ReopenIssueRequest,
@@ -26,6 +27,7 @@ from agent_board.services import auth as auth_svc
 from agent_board.services import decisions as decisions_svc
 from agent_board.services import delivery as delivery_svc
 from agent_board.services import issues as issues_svc
+from agent_board.services import onboarding as onboarding_svc
 from agent_board.services.context import AppServices, AuthContext
 from agent_board.store import boards as boards_store
 
@@ -452,3 +454,25 @@ def admin_run_backup(
 ) -> dict[str, Any]:
     auth_svc.require_server_owner(ctx)
     return backup_mgr.run_backup(services)
+
+
+@router.post("/admin/onboard", status_code=201)
+async def admin_onboard(
+    body: OnboardAgentRequest,
+    ctx: AuthContext = Depends(require_api_write),
+    services: AppServices = Depends(get_services),
+) -> dict[str, Any]:
+    return await onboarding_svc.onboard_agent(
+        services,
+        ctx,
+        handle=body.handle,
+        boards=body.boards,
+        display_name=body.display_name,
+        role=body.role,
+        strict_scope=body.strict_scope,
+        rotate_tokens=body.rotate_tokens,
+        webhook_url=body.webhook_url,
+        webhook_auth_header=body.webhook_auth_header,
+        skip_plain_notes=body.skip_plain_notes,
+        test_webhook=body.test_webhook,
+    )

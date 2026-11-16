@@ -18,6 +18,76 @@
 </div>
 {% endif %}
 
+{% if onboard_result %}
+<div class="alert alert-success">
+  <strong>Onboarded @{{ onboard_result.principal_handle }} ({{ onboard_result.boards | join(',') }} · {{ onboard_result.role }}):</strong>
+  Copy this token now — it will not be shown again:<br>
+  <code style="font-size:1.05rem;word-break:break-all">{{ onboard_result.env_var_name }}={{ onboard_result.token.token }}</code>
+  {% if onboard_result.webhook_test %}
+  <div style="margin-top:0.5rem">
+    Webhook test: <strong>{{ 'OK (HTTP ' ~ onboard_result.webhook_test.status_code ~ ')' if onboard_result.webhook_test.ok else 'FAILED: ' ~ onboard_result.webhook_test.error }}</strong>
+  </div>
+  {% endif %}
+  <details style="margin-top:0.5rem" open>
+    <summary>Copy-pasteable Onboarding Prompt</summary>
+    <pre style="white-space:pre-wrap;margin-top:0.4rem">{{ onboard_result.remote_onboarding_md }}</pre>
+  </details>
+</div>
+{% endif %}
+
+<div class="card">
+  <h2 style="margin-top:0">Quick Onboard / Rotate Agent (1-Step)</h2>
+  <form method="post" action="/admin/onboard">
+    <input type="hidden" name="csrf_token" value="{{ ctx.csrf_token }}">
+    <div class="row">
+      <div>
+        <label>Agent Handle</label>
+        <input name="handle" type="text" required placeholder="e.g. qa-agent">
+      </div>
+      <div>
+        <label>Display Name (optional)</label>
+        <input name="display_name" type="text" placeholder="e.g. QA Agent">
+      </div>
+      <div>
+        <label>Role</label>
+        <select name="role">
+          <option value="agent">agent</option>
+          <option value="readonly">readonly</option>
+        </select>
+      </div>
+    </div>
+    <div style="margin:0.5rem 0">
+      <label style="display:block;margin-bottom:0.25rem">Boards</label>
+      <div style="display:flex;flex-wrap:wrap;gap:0.75rem">
+        {% for b in all_boards %}
+        <label style="display:inline-flex;align-items:center;gap:0.35rem;font-weight:normal">
+          <input type="checkbox" name="boards" value="{{ b.slug }}"> <code>{{ b.slug }}</code>
+        </label>
+        {% endfor %}
+      </div>
+    </div>
+    <div class="row">
+      <div>
+        <label>Webhook URL (optional, for remote/routine agents)</label>
+        <input name="webhook_url" type="url" placeholder="https://...">
+      </div>
+      <div>
+        <label>Webhook Authorization Header (optional)</label>
+        <input name="webhook_auth_header" type="text" placeholder="Bearer ...">
+      </div>
+    </div>
+    <div style="display:flex;flex-wrap:wrap;gap:1.25rem;margin:0.5rem 0">
+      <label style="display:inline-flex;align-items:center;gap:0.35rem;font-weight:normal">
+        <input type="checkbox" name="skip_plain_notes" value="1" checked> Skip plain unmentioned notes
+      </label>
+      <label style="display:inline-flex;align-items:center;gap:0.35rem;font-weight:normal">
+        <input type="checkbox" name="rotate_tokens" value="1" checked> Rotate older tokens &amp; strictly scope memberships
+      </label>
+    </div>
+    <button type="submit" class="sm">Onboard / Rotate Agent</button>
+  </form>
+</div>
+
 <div class="row">
   <div class="card">
     <h2 style="margin-top:0">Create Board</h2>
@@ -162,6 +232,11 @@
     <div>
       <label>Boards (* or csv)</label>
       <input name="boards" type="text" value="*">
+    </div>
+    <div style="align-self:end">
+      <label style="display:inline-flex;align-items:center;gap:0.35rem;font-weight:normal;margin-bottom:0.35rem">
+        <input type="checkbox" name="skip_plain_notes" value="1" checked> Skip plain notes
+      </label>
     </div>
     <div style="align-self:end">
       <button type="submit" class="sm">Add Subscription</button>

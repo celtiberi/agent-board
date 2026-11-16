@@ -21,6 +21,7 @@ from agent_board.services import decisions as decisions_svc
 from agent_board.services import delivery as delivery_svc
 from agent_board.services import issues as issues_svc
 from agent_board.services import messages as messages_svc
+from agent_board.services import onboarding as onboarding_svc
 from agent_board.services import search as search_svc
 from agent_board.services.context import AppServices, AuthContext
 from agent_board.store import boards as boards_store
@@ -611,6 +612,7 @@ def create_web_router() -> APIRouter:
             audit_entries=auth_svc.list_audit_logs(services, ctx, limit=50),
             new_token=flash.get("new_token"),
             new_sub_secret=flash.get("new_sub_secret"),
+            onboard_result=flash.get("onboard_result"),
         )
 
     @router.post("/admin/boards")
@@ -698,6 +700,43 @@ def create_web_router() -> APIRouter:
         )
         return _redirect("/admin?ok=Membership+updated")
 
+    @router.post("/admin/onboard")
+    async def web_admin_onboard(
+        request: Request,
+        csrf_token: str = Form(...),
+        handle: str = Form(...),
+        display_name: str = Form(default=""),
+        boards: list[str] = Form(default=[]),
+        role: str = Form(default="agent"),
+        webhook_url: str = Form(default=""),
+        webhook_auth_header: str = Form(default=""),
+        skip_plain_notes: str = Form(default=""),
+        rotate_tokens: str = Form(default=""),
+    ) -> RedirectResponse:
+        ctx = _session_ctx(request)
+        if ctx is None:
+            return _redirect("/login")
+        _require_csrf(ctx, csrf_token)
+        clean_boards = [b.strip() for b in boards if b.strip()]
+        if not clean_boards:
+            return _redirect("/admin?err=Select+at+least+one+board")
+        res = await onboarding_svc.onboard_agent(
+            _services(request),
+            ctx,
+            handle=handle,
+            boards=clean_boards,
+            display_name=display_name.strip() or None,
+            role=role,
+            strict_scope=bool(rotate_tokens),
+            rotate_tokens=bool(rotate_tokens),
+            webhook_url=webhook_url.strip() or None,
+            webhook_auth_header=webhook_auth_header.strip() or None,
+            skip_plain_notes=bool(skip_plain_notes),
+            test_webhook=bool(webhook_url.strip()),
+        )
+        _ONE_TIME_FLASH[ctx.csrf_token or ""] = {"onboard_result": res}
+        return _redirect("/admin?ok=Agent+onboarded")
+
     @router.post("/admin/subscriptions")
     def web_admin_create_sub(
         request: Request,
@@ -706,17 +745,28 @@ def create_web_router() -> APIRouter:
         url: str = Form(...),
         auth_header: str = Form(default=""),
         boards: str = Form(default="*"),
+        skip_plain_notes: str = Form(default=""),
     ) -> RedirectResponse:
         ctx = _session_ctx(request)
         if ctx is None:
             return _redirect("/login")
         _require_csrf(ctx, csrf_token)
         board_list = [b.strip() for b in boards.split(",") if b.strip()] or ["*"]
+        filter_cfg = (
+            {
+                "exclude_self": True,
+                "mentions_only": False,
+                "types": list(onboarding_svc.ACTIONABLE_MESSAGE_TYPES),
+            }
+            if bool(skip_plain_notes)
+            else None
+        )
         sub = delivery_svc.create_subscription(
             _services(request),
             ctx,
             url=url,
             boards=board_list,
+            filter_cfg=filter_cfg,
             auth_header=auth_header.strip() or None,
             principal_handle=principal_handle,
         )

@@ -196,3 +196,39 @@ def test_server_owner_agent_token_sees_and_manages_all_boards(env: BoardTestEnv)
     assert restricted_visible["alpha"] == "readonly"
     with pytest.raises(PermissionDeniedError):
         messages_svc.post_message(env.services, restricted_ctx, board_slug="alpha", msg_type="note", body_md="Denied")
+
+
+def test_local_agent_profile_installer_and_loader(tmp_path: object, monkeypatch: pytest.MonkeyPatch) -> None:
+    import json
+    from pathlib import Path
+
+    from agent_board.board_cli import _load_config, install_local_agent_profile
+
+    fake_home = Path(str(tmp_path))
+    monkeypatch.setenv("HOME", str(fake_home))
+
+    info = install_local_agent_profile(
+        "research-agent",
+        "http://127.0.0.1:8790",
+        "ab_test_research_token_123",
+        register_antigravity_mcp=True,
+    )
+    profile_path = fake_home / ".config" / "agent-board" / "profiles" / "research-agent.toml"
+    wrapper_path = fake_home / ".local" / "bin" / "board-research-agent"
+    mcp_path = fake_home / ".gemini" / "config" / "mcp_config.json"
+
+    assert info["profile_path"] == str(profile_path)
+    assert profile_path.exists()
+    assert wrapper_path.exists()
+    assert mcp_path.exists()
+
+    mcp_json = json.loads(mcp_path.read_text(encoding="utf-8"))
+    assert mcp_json["mcpServers"]["agent-board-research-agent"]["args"] == [
+        "--profile",
+        "research-agent",
+        "mcp-stdio",
+    ]
+
+    url, tok = _load_config(profile_override="research-agent")
+    assert url == "http://127.0.0.1:8790"
+    assert tok == "ab_test_research_token_123"

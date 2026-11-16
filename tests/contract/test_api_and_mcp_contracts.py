@@ -182,3 +182,48 @@ async def test_rest_api_matches_published_json_schemas(env: BoardTestEnv) -> Non
             audit = await client.get("/api/v1/admin/audit", headers=owner_headers)
             assert audit.status_code == 200
             assert len(audit.json()["entries"]) > 0
+
+            # One-step agent onboarding (create + scope + token + filtered webhook) & idempotent rotation
+            onboard_1 = await client.post(
+                "/api/v1/admin/onboard",
+                headers=owner_headers,
+                json={
+                    "handle": "new-qa",
+                    "display_name": "New QA Agent",
+                    "boards": ["alpha"],
+                    "role": "agent",
+                    "webhook_url": "https://example.invalid/new-qa-hook",
+                    "webhook_auth_header": "Authorization: Bearer hook-secret",
+                    "skip_plain_notes": True,
+                    "test_webhook": False,
+                },
+            )
+            assert onboard_1.status_code == 201, onboard_1.text
+            o1 = onboard_1.json()
+            assert o1["principal_handle"] == "new-qa"
+            assert o1["env_var_name"] == "AGENT_BOARD_NEW_QA_TOKEN"
+            assert o1["token"]["board_scope"] == ["alpha"]
+            assert "note" not in o1["subscription"]["filter"]["types"]
+            assert "task" in o1["subscription"]["filter"]["types"]
+
+            # Re-running rotates old token and replaces matching webhook without duplicating subscriptions
+            onboard_2 = await client.post(
+                "/api/v1/admin/onboard",
+                headers=owner_headers,
+                json={
+                    "handle": "new-qa",
+                    "boards": ["alpha"],
+                    "role": "readonly",
+                    "webhook_url": "https://example.invalid/new-qa-hook",
+                    "skip_plain_notes": True,
+                    "test_webhook": False,
+                },
+            )
+            assert onboard_2.status_code == 201
+            o2 = onboard_2.json()
+            assert o1["token"]["prefix"] in o2["revoked_prefixes"]
+            assert o2["token"]["max_role"] == "readonly"
+            subs_all = (await client.get("/api/v1/subscriptions?all=true", headers=owner_headers)).json()[
+                "subscriptions"
+            ]
+            assert sum(1 for s in subs_all if s["principal_handle"] == "new-qa") == 1

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import time
 import tomllib
 from pathlib import Path
@@ -13,13 +14,45 @@ import httpx
 import typer
 
 client_app = typer.Typer(help="Agent Board CLI client.")
+_ACTIVE_PROFILE: str | None = None
 
 
-def _load_config() -> tuple[str, str]:
+@client_app.callback()
+def _main_callback(
+    profile: str | None = typer.Option(
+        None,
+        "--profile",
+        "-p",
+        help="Named client profile (~/.config/agent-board/profiles/<name>.toml).",
+    ),
+) -> None:
+    global _ACTIVE_PROFILE
+    _ACTIVE_PROFILE = profile.strip() if profile else None
+
+
+def _load_config(profile_override: str | None = None) -> tuple[str, str]:
+    cfg_dir = Path("~/.config/agent-board").expanduser()
+    prof = (
+        profile_override.strip()
+        if profile_override is not None
+        else (_ACTIVE_PROFILE or os.environ.get("AGENT_BOARD_PROFILE", "").strip())
+    )
+    if prof:
+        prof_file = cfg_dir / "profiles" / f"{prof}.toml"
+        if not prof_file.exists():
+            typer.echo(f"Missing profile '{prof}': {prof_file} not found", err=True)
+            raise typer.Exit(1)
+        data = tomllib.loads(prof_file.read_text(encoding="utf-8"))
+        url = str(data.get("url", "")).strip().rstrip("/") or "http://127.0.0.1:8790"
+        token = str(data.get("token", "")).strip()
+        if not token:
+            typer.echo(f"Profile '{prof}' in {prof_file} has no token", err=True)
+            raise typer.Exit(1)
+        return url, token
+
     url = os.environ.get("AGENT_BOARD_URL", "").strip()
     token = os.environ.get("AGENT_BOARD_TOKEN", "").strip()
 
-    cfg_dir = Path("~/.config/agent-board").expanduser()
     toml_file = cfg_dir / "config.toml"
     if toml_file.exists():
         data = tomllib.loads(toml_file.read_text(encoding="utf-8"))
@@ -356,3 +389,153 @@ def admin_revoke_token(token_id: str = typer.Argument(...)) -> None:
     with _client() as c:
         data = _check_resp(c.post(f"/admin/tokens/{token_id}/revoke"))
     typer.echo(json.dumps(data, indent=2))
+
+
+def install_local_agent_profile(
+    handle: str,
+    url: str,
+    token: str,
+    *,
+    register_antigravity_mcp: bool,
+) -> dict[str, str]:
+    """Install a named profile, wrapper CLI (~/.local/bin/board-<handle>), and optional Antigravity MCP entry."""
+    clean_handle = handle.strip().lower()
+    cfg_dir = Path("~/.config/agent-board").expanduser()
+    profiles_dir = cfg_dir / "profiles"
+    profiles_dir.mkdir(parents=True, exist_ok=True)
+    os.chmod(profiles_dir, 0o700)
+
+    profile_path = profiles_dir / f"{clean_handle}.toml"
+    profile_path.write_text(
+        f'url = "{url.rstrip("/")}"\ntoken = "{token}"\n',
+        encoding="utf-8",
+    )
+    os.chmod(profile_path, 0o600)
+
+    bin_dir = Path("~/.local/bin").expanduser()
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    board_bin = shutil.which("board") or str(bin_dir / "board")
+
+    wrapper_path = bin_dir / f"board-{clean_handle}"
+    wrapper_path.write_text(
+        f'#!/bin/sh\nexec "{board_bin}" --profile "{clean_handle}" "$@"\n',
+        encoding="utf-8",
+    )
+    os.chmod(wrapper_path, 0o755)
+
+    out = {
+        "profile_path": str(profile_path),
+        "wrapper_path": str(wrapper_path),
+        "cli_cmd": f"board-{clean_handle}",
+    }
+
+    if register_antigravity_mcp:
+        mcp_path = Path("~/.gemini/config/mcp_config.json").expanduser()
+        mcp_path.parent.mkdir(parents=True, exist_ok=True)
+        if mcp_path.exists():
+            mcp_data = json.loads(mcp_path.read_text(encoding="utf-8"))
+        else:
+            mcp_data = {}
+        servers = mcp_data.setdefault("mcpServers", {})
+        mcp_name = f"agent-board-{clean_handle}"
+        servers[mcp_name] = {
+            "command": board_bin,
+            "args": ["--profile", clean_handle, "mcp-stdio"],
+        }
+        mcp_path.write_text(json.dumps(mcp_data, indent=2) + "\n", encoding="utf-8")
+        os.chmod(mcp_path, 0o600)
+        out["mcp_config_path"] = str(mcp_path)
+        out["mcp_server_name"] = mcp_name
+
+    return out
+
+
+@admin_cli.command("onboard")
+def admin_onboard(
+    handle: str = typer.Argument(...),
+    board: list[str] = typer.Option(..., "--board", "-b", help="Board slug(s) to grant access to."),
+    target: str = typer.Option("remote", "--target", "-t", help="Target runtime: remote, antigravity, or local."),
+    name: str | None = typer.Option(None, "--name", help="Display name if creating principal."),
+    role: str = typer.Option("agent", "--role", help="Role: agent, readonly, or owner."),
+    webhook_url: str | None = typer.Option(None, "--webhook-url", help="Optional routine/webhook URL."),
+    webhook_auth: str | None = typer.Option(None, "--webhook-auth", help="Optional webhook Authorization header."),
+    skip_notes: bool = typer.Option(
+        True, "--skip-notes/--all-messages", help="Skip plain unmentioned notes on webhook."
+    ),
+    rotate: bool = typer.Option(True, "--rotate/--keep-tokens", help="Revoke prior active tokens for this handle."),
+    strict: bool = typer.Option(True, "--strict/--no-strict", help="Remove memberships outside --board."),
+    json_out: bool = typer.Option(False, "--json"),
+) -> None:
+    """Create/update an agent, scope boards, rotate token, optionally test webhook, and configure local runtime."""
+    clean_target = target.strip().lower()
+    if clean_target not in ("remote", "antigravity", "local"):
+        typer.echo("Error: --target must be remote, antigravity, or local", err=True)
+        raise typer.Exit(1)
+
+    clean_boards = [s.strip() for raw in board for s in raw.split(",") if s.strip()]
+    base_url, _ = _load_config()
+
+    payload: dict[str, Any] = {
+        "handle": handle,
+        "boards": clean_boards,
+        "role": role,
+        "strict_scope": strict,
+        "rotate_tokens": rotate,
+        "skip_plain_notes": skip_notes,
+        "test_webhook": bool(webhook_url),
+    }
+    if name is not None:
+        payload["display_name"] = name
+    if webhook_url is not None:
+        payload["webhook_url"] = webhook_url
+    if webhook_auth is not None:
+        payload["webhook_auth_header"] = webhook_auth
+
+    with _client() as c:
+        data = _check_resp(c.post("/admin/onboard", json=payload))
+
+    local_info: dict[str, str] | None = None
+    if clean_target in ("antigravity", "local"):
+        new_token = data["token"]["token"]
+        local_info = install_local_agent_profile(
+            data["principal_handle"],
+            base_url,
+            new_token,
+            register_antigravity_mcp=(clean_target == "antigravity"),
+        )
+        me_resp = httpx.get(
+            f"{base_url}/api/v1/me",
+            headers={"Authorization": f"Bearer {new_token}"},
+            timeout=15.0,
+        )
+        me_data = _check_resp(me_resp)
+        if me_data.get("principal", {}).get("handle") != data["principal_handle"]:
+            typer.echo("Error: newly installed profile failed identity check", err=True)
+            raise typer.Exit(1)
+        data["local_profile"] = local_info
+
+    if json_out:
+        typer.echo(json.dumps(data, indent=2))
+        return
+
+    typer.echo(f"Onboarded @{data['principal_handle']} -> boards={data['boards']} role={data['role']}")
+    if data["revoked_prefixes"]:
+        typer.echo(f"Revoked prior tokens: {', '.join(data['revoked_prefixes'])}")
+
+    if local_info is not None:
+        typer.echo(f"Profile saved: {local_info['profile_path']}")
+        typer.echo(f"CLI wrapper:   {local_info['wrapper_path']}")
+        if "mcp_server_name" in local_info:
+            typer.echo(f"Antigravity MCP added: {local_info['mcp_server_name']} in {local_info['mcp_config_path']}")
+        typer.echo("")
+        typer.echo("--- Onboarding Prompt ---")
+        typer.echo(data["local_profile_onboarding_md"])
+    else:
+        typer.echo(f"{data['env_var_name']}={data['token']['token']}")
+        if data.get("webhook_test"):
+            wt = data["webhook_test"]
+            status_str = f"OK (HTTP {wt['status_code']})" if wt.get("ok") else f"FAILED ({wt.get('error')})"
+            typer.echo(f"Webhook test: {status_str}")
+        typer.echo("")
+        typer.echo("--- Onboarding Prompt ---")
+        typer.echo(data["remote_onboarding_md"])

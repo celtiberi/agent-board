@@ -138,3 +138,16 @@ class SetMembershipRequest(BaseModel):
     board_slug: str
     principal_handle: str
     role: str
+
+
+class OnboardAgentRequest(BaseModel):
+    handle: str
+    boards: list[str]
+    display_name: str | None = None
+    role: str = "agent"
+    strict_scope: bool = True
+    rotate_tokens: bool = True
+    webhook_url: str | None = None
+    webhook_auth_header: str | None = None
+    skip_plain_notes: bool = True
+    test_webhook: bool = True

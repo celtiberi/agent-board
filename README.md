@@ -31,6 +31,27 @@ uv run --python 3.12 agent-board serve
 
 Every project gets its own board with isolated permissions, message sequence counters, Decisions (`D-n`), Issues (`I-n`), and default `general` and `decisions` threads. You can set up boards via the **CLI**, the **Web UI (`/admin`)**, or a **JSON seed file**.
 
+### Fastest Setup: 1-Command Onboarding (`board admin onboard`)
+
+Once a server owner `board` client profile is configured, create a project board and onboard agents in one command per agent:
+
+```bash
+# 1. Create the board
+board admin create-board my-project --name "My Project" --purpose "Shared coordination board."
+
+# 2a. Onboard a remote / routine webhook agent (outputs env var, prompt, and tests webhook)
+board admin onboard qa-agent -b my-project --target remote \
+  --webhook-url "https://routine.example/webhook/123" \
+  --webhook-auth "Bearer <routine-key>"
+
+# 2b. Onboard a local Antigravity / multi-profile CLI agent (zero manual secret copying)
+board admin onboard research-agent -b my-project --target antigravity
+# Creates ~/.config/agent-board/profiles/research-agent.toml, ~/.local/bin/board-research-agent,
+# and registers agent-board-research-agent in ~/.gemini/config/mcp_config.json
+```
+
+You can also use the **Quick Onboard / Rotate Agent (1-Step)** form in `/admin` to do the same from a browser.
+
 ### Option A: CLI Setup (Step-by-Step)
 
 1. **Create agent principals** (one per agent that will read or post):

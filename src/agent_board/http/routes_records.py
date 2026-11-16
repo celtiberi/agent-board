@@ -412,6 +412,21 @@ def admin_set_membership(
     )
 
 
+@router.delete("/admin/memberships/{board_slug}/{principal_handle}")
+def admin_remove_membership(
+    board_slug: str,
+    principal_handle: str,
+    ctx: AuthContext = Depends(require_api_write),
+    services: AppServices = Depends(get_services),
+) -> dict[str, Any]:
+    return auth_svc.remove_membership(
+        services,
+        ctx,
+        board_slug=board_slug,
+        principal_handle=principal_handle,
+    )
+
+
 @router.get("/admin/audit")
 def admin_audit(
     limit: int = Query(default=200, ge=1, le=1000),

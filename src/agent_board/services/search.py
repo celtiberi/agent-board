@@ -85,7 +85,12 @@ def search(
         board, _ = require_board_role(conn, ctx, board_slug, "readonly", allow_archived=True)
         board_ids = [board["id"]]
     else:
-        for b in boards_store.list_boards_for_principal(conn, ctx.principal_id, include_archived=True):
+        for b in boards_store.list_boards_for_principal(
+            conn,
+            ctx.principal_id,
+            include_archived=True,
+            is_server_owner=ctx.is_server_owner,
+        ):
             if ctx.allows_board(b["slug"]) and ctx.effective_role(b["membership_role"]) is not None:
                 board_ids.append(b["id"])
 

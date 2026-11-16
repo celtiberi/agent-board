@@ -9,11 +9,14 @@ from agent_board.errors import AuthError, PermissionDeniedError, RateLimitError
 from agent_board.services import boards as boards_svc
 from agent_board.services import decisions as decisions_svc
 from agent_board.services import messages as messages_svc
+from agent_board.services import search as search_svc
 from agent_board.services.auth import (
     RateLimiter,
     authenticate_bearer,
+    create_principal,
     create_token,
     login_human,
+    remove_membership,
     revoke_token,
     set_human_password,
     set_principal_disabled,
@@ -143,3 +146,53 @@ def test_rate_limiter_enforces_write_and_read_caps() -> None:
         limiter.check("t1", is_write=False)
     # Suppress unused import check
     assert decisions_svc is not None
+
+
+def test_server_owner_agent_token_sees_and_manages_all_boards(env: BoardTestEnv) -> None:
+    create_principal(
+        env.services,
+        env.owner_ctx,
+        handle="manager-ai",
+        kind="agent",
+        display_name="Manager AI",
+        is_server_owner=True,
+    )
+    boards_svc.create_board(env.services, env.owner_ctx, slug="gamma", name="Gamma", purpose="Third board")
+    remove_membership(env.services, env.owner_ctx, board_slug="gamma", principal_handle="manager-ai")
+
+    mgr_tok = create_token(
+        env.services,
+        env.owner_ctx,
+        principal_handle="manager-ai",
+        name="mgr-all",
+        board_scope=["*"],
+        max_role="owner",
+    )
+    mgr_ctx = authenticate_bearer(env.services, mgr_tok["token"])
+
+    visible = {b["slug"]: b["role"] for b in boards_svc.list_boards(env.services, mgr_ctx)}
+    assert visible["alpha"] == "owner"
+    assert visible["gamma"] == "owner"
+
+    posted = messages_svc.post_message(
+        env.services, mgr_ctx, board_slug="gamma", msg_type="note", body_md="Owner token visibility check"
+    )
+    assert posted["seq"] == 1
+
+    hits = search_svc.search(env.services, mgr_ctx, query="visibility")
+    assert any(h["board_slug"] == "gamma" for h in hits["hits"])
+
+    restricted_tok = create_token(
+        env.services,
+        env.owner_ctx,
+        principal_handle="manager-ai",
+        name="mgr-alpha-ro",
+        board_scope=["alpha"],
+        max_role="readonly",
+    )
+    restricted_ctx = authenticate_bearer(env.services, restricted_tok["token"])
+    restricted_visible = {b["slug"]: b["role"] for b in boards_svc.list_boards(env.services, restricted_ctx)}
+    assert list(restricted_visible.keys()) == ["alpha"]
+    assert restricted_visible["alpha"] == "readonly"
+    with pytest.raises(PermissionDeniedError):
+        messages_svc.post_message(env.services, restricted_ctx, board_slug="alpha", msg_type="note", body_md="Denied")

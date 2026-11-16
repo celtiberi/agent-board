@@ -33,12 +33,22 @@ def get_board_by_id(conn: sqlite3.Connection, board_id: str) -> sqlite3.Row | No
 
 
 def list_boards_for_principal(
-    conn: sqlite3.Connection, principal_id: str, *, include_archived: bool = False
+    conn: sqlite3.Connection,
+    principal_id: str,
+    *,
+    include_archived: bool = False,
+    is_server_owner: bool = False,
 ) -> list[sqlite3.Row]:
     archive_clause = "" if include_archived else "AND b.archived_at IS NULL"
+    role_select = "COALESCE(m.role, 'owner') AS membership_role" if is_server_owner else "m.role AS membership_role"
+    membership_join = (
+        "LEFT JOIN memberships m ON m.board_id = b.id AND m.principal_id = ?"
+        if is_server_owner
+        else "JOIN memberships m ON m.board_id = b.id AND m.principal_id = ?"
+    )
     return conn.execute(
         f"""
-        SELECT b.*, m.role AS membership_role,
+        SELECT b.*, {role_select},
                COALESCE(c.read_seq, 0) AS read_seq,
                (SELECT COUNT(*)
                 FROM messages msg
@@ -57,7 +67,7 @@ def list_boards_for_principal(
                 FROM messages msg
                 WHERE msg.board_id = b.id) AS last_activity_at
         FROM boards b
-        JOIN memberships m ON m.board_id = b.id AND m.principal_id = ?
+        {membership_join}
         LEFT JOIN cursors c ON c.board_id = b.id AND c.principal_id = ?
         WHERE 1 = 1 {archive_clause}
         ORDER BY COALESCE(last_activity_at, b.created_at) DESC, b.slug ASC

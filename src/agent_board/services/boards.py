@@ -26,7 +26,7 @@ def _parse_settings(raw_json: str) -> dict[str, Any]:
 
 def board_row_to_dict(row: sqlite3.Row, ctx: AuthContext) -> dict[str, Any]:
     m_role = row["membership_role"] if "membership_role" in row.keys() else None
-    if m_role is None and ctx.is_server_owner and ctx.auth_kind == "session":
+    if m_role is None and ctx.is_server_owner:
         m_role = "owner"
     eff_role = ctx.effective_role(m_role) if m_role else None
     return {
@@ -192,7 +192,10 @@ def create_board(
 
 def list_boards(services: AppServices, ctx: AuthContext, *, include_archived: bool = False) -> list[dict[str, Any]]:
     rows = boards_store.list_boards_for_principal(
-        services.db.read_conn(), ctx.principal_id, include_archived=include_archived
+        services.db.read_conn(),
+        ctx.principal_id,
+        include_archived=include_archived,
+        is_server_owner=ctx.is_server_owner,
     )
     visible: list[dict[str, Any]] = []
     for row in rows:

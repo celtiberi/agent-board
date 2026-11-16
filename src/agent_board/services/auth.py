@@ -358,7 +358,7 @@ def require_board_role(
 
     membership = boards_store.get_membership(conn, board["id"], ctx.principal_id)
     membership_role = membership["role"] if membership is not None else None
-    if membership_role is None and ctx.is_server_owner and ctx.auth_kind == "session":
+    if membership_role is None and ctx.is_server_owner:
         membership_role = "owner"
 
     eff = ctx.effective_role(membership_role)

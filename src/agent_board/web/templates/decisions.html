@@ -1,0 +1,134 @@
+{% extends "base.html" %}
+{% block title %}Decisions — {{ board.name }}{% endblock %}
+{% block content %}
+<div class="subnav">
+  <a href="/b/{{ board.slug }}">Brief &amp; Threads</a>
+  <a href="/b/{{ board.slug }}/decisions" class="active">Decisions</a>
+  <a href="/b/{{ board.slug }}/issues">Issues</a>
+  <a href="/b/{{ board.slug }}/decisions/export.md">Export DECISIONS.md</a>
+</div>
+
+<h1>Decisions — {{ board.name }}</h1>
+
+<div class="card">
+  <h2 style="margin-top:0">Record Decision</h2>
+  <form method="post" action="/b/{{ board.slug }}/decisions">
+    <input type="hidden" name="csrf_token" value="{{ ctx.csrf_token }}">
+    <div class="row">
+      <div>
+        <label for="title">Title</label>
+        <input id="title" name="title" type="text" value="{{ prefill_title or '' }}" required>
+      </div>
+      <div>
+        <label for="decided_by">Decided by</label>
+        <input id="decided_by" name="decided_by" type="text" value="{{ ctx.handle }}" required>
+      </div>
+      <div>
+        <label for="decided_on">Date (YYYY-MM-DD)</label>
+        <input id="decided_on" name="decided_on" type="date" value="{{ today_date }}" required>
+      </div>
+    </div>
+    <label for="statement">Statement (1–5 sentences)</label>
+    <textarea id="statement" name="statement" required>{{ prefill_statement or '' }}</textarea>
+    <div class="row">
+      <div>
+        <label for="rationale">Rationale (optional)</label>
+        <input id="rationale" name="rationale" type="text">
+      </div>
+      <div>
+        <label for="tags">Tags (comma-separated)</label>
+        <input id="tags" name="tags" type="text" placeholder="architecture, wording">
+      </div>
+    </div>
+    <button type="submit">Record Decision</button>
+  </form>
+</div>
+
+<h2>Active Decisions ({{ active_count }})</h2>
+{% if not grouped_active %}
+  <div class="card meta">No active decisions yet.</div>
+{% else %}
+  {% for tag, items in grouped_active %}
+    <h3>Tag: <code>{{ tag }}</code></h3>
+    {% for d in items %}
+      <div class="card" id="{{ d.ref }}">
+        <div style="display:flex;flex-wrap:wrap;justify-content:space-between;gap:0.5rem">
+          <div>
+            <strong>{{ d.ref }}: {{ d.title }}</strong>
+            {% for t in d.tags %}<span class="badge">{{ t }}</span>{% endfor %}
+          </div>
+          <div class="meta">
+            {{ d.decided_on }} · decided by <strong>{{ d.decided_by }}</strong>
+            {% if d.recorded_by_handle != d.decided_by %}
+              (recorded by {{ d.recorded_by_handle }})
+            {% endif %}
+          </div>
+        </div>
+        <div class="md-body" style="margin-top:0.5rem">{{ d.statement | md }}</div>
+        {% if d.rationale %}
+          <p class="meta" style="margin:0.35rem 0"><em>Rationale:</em> {{ d.rationale }}</p>
+        {% endif %}
+
+        <details>
+          <summary>Supersede {{ d.ref }}</summary>
+          <form method="post" action="/b/{{ board.slug }}/decisions/{{ d.ref }}/supersede">
+            <input type="hidden" name="csrf_token" value="{{ ctx.csrf_token }}">
+            <div class="row">
+              <div>
+                <label>New Title</label>
+                <input name="title" type="text" value="{{ d.title }}" required>
+              </div>
+              <div>
+                <label>Decided by</label>
+                <input name="decided_by" type="text" value="{{ ctx.handle }}" required>
+              </div>
+              <div>
+                <label>Date</label>
+                <input name="decided_on" type="date" value="{{ today_date }}" required>
+              </div>
+            </div>
+            <label>New Statement</label>
+            <textarea name="statement" required>{{ d.statement }}</textarea>
+            <label>Supersession Reason</label>
+            <input name="reason" type="text" required placeholder="e.g. policy update or wording correction">
+            <label>Tags (comma-separated)</label>
+            <input name="tags" type="text" value="{{ d.tags | join(', ') }}">
+            <button type="submit" class="sm">Create Replacement &amp; Supersede</button>
+          </form>
+        </details>
+
+        {% if board.role == 'owner' %}
+        <details>
+          <summary style="color:#b91c1c">Revoke {{ d.ref }}</summary>
+          <form method="post" action="/b/{{ board.slug }}/decisions/{{ d.ref }}/revoke">
+            <input type="hidden" name="csrf_token" value="{{ ctx.csrf_token }}">
+            <label>Reason</label>
+            <input name="reason" type="text" required>
+            <button type="submit" class="sm danger">Revoke Decision</button>
+          </form>
+        </details>
+        {% endif %}
+      </div>
+    {% endfor %}
+  {% endfor %}
+{% endif %}
+
+{% if historical %}
+<details class="card">
+  <summary>Superseded &amp; Revoked Decisions ({{ historical | length }})</summary>
+  {% for d in historical %}
+    <div style="border-top:1px solid var(--border);padding-top:0.65rem;margin-top:0.65rem" id="{{ d.ref }}">
+      <div>
+        <span class="badge">{{ d.status }}</span>
+        <strong>{{ d.ref }}: {{ d.title }}</strong>
+        {% if d.superseded_by_ref %}
+          → replaced by <a href="#{{ d.superseded_by_ref }}"><strong>{{ d.superseded_by_ref }}</strong></a>
+        {% endif %}
+        <span class="meta">({{ d.decided_on }}, {{ d.decided_by }})</span>
+      </div>
+      <div class="md-body">{{ d.statement | md }}</div>
+    </div>
+  {% endfor %}
+</details>
+{% endif %}
+{% endblock %}

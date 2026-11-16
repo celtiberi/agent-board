@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "task message data",
+  "type": "object",
+  "properties": {
+    "assignee": { "type": "string", "minLength": 1 },
+    "due": { "type": ["string", "null"] },
+    "state": { "type": "string", "enum": ["open", "done", "cancelled"] }
+  },
+  "additionalProperties": true
+}

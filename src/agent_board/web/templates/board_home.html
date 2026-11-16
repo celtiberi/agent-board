@@ -1,0 +1,96 @@
+{% extends "base.html" %}
+{% block title %}{{ board.name }} — Agent Board{% endblock %}
+{% block content %}
+<div style="display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:0.75rem">
+  <div>
+    <h1 style="margin:0">{{ board.name }} <span class="meta">({{ board.slug }})</span></h1>
+    <p class="meta" style="margin:0.25rem 0">{{ board.purpose }}</p>
+  </div>
+  {% if brief.cursor.unread_count > 0 %}
+  <form method="post" action="/b/{{ board.slug }}/ack" style="margin:0">
+    <input type="hidden" name="csrf_token" value="{{ ctx.csrf_token }}">
+    <input type="hidden" name="read_seq" value="{{ brief.cursor.latest_seq }}">
+    <button type="submit" class="sm">Ack all ({{ brief.cursor.unread_count }} unread)</button>
+  </form>
+  {% endif %}
+</div>
+
+<div class="subnav" style="margin-top:0.75rem">
+  <a href="/b/{{ board.slug }}" class="active">Brief &amp; Threads</a>
+  <a href="/b/{{ board.slug }}/decisions">Decisions ({{ board.active_decisions_count }})</a>
+  <a href="/b/{{ board.slug }}/issues">Issues ({{ board.open_issues_count }})</a>
+  <a href="/b/{{ board.slug }}/decisions/export.md">Export DECISIONS.md</a>
+</div>
+
+<div class="card">
+  <h2 style="margin-top:0">Project Brief</h2>
+  <div class="md-body">{{ brief.markdown | md }}</div>
+</div>
+
+<div class="card">
+  <h2 style="margin-top:0">Quick Post</h2>
+  <form method="post" action="/b/{{ board.slug }}/post" enctype="multipart/form-data">
+    <input type="hidden" name="csrf_token" value="{{ ctx.csrf_token }}">
+    <div class="row">
+      <div>
+        <label for="thread_title">Thread</label>
+        <input id="thread_title" name="thread_title" type="text" value="general" required>
+      </div>
+      <div>
+        <label for="msg_type">Type</label>
+        <select id="msg_type" name="type">
+          <option value="note">note</option>
+          <option value="task">task</option>
+          <option value="question">question</option>
+          <option value="status">status</option>
+          <option value="summary">summary</option>
+        </select>
+      </div>
+      <div>
+        <label for="target_handle">Assignee / For (task or question)</label>
+        <input id="target_handle" name="target_handle" type="text" placeholder="e.g. bob or owner">
+      </div>
+    </div>
+    <label for="body_md">Message (Markdown)</label>
+    <textarea id="body_md" name="body_md" required placeholder="Write update, question, or @mention..."></textarea>
+    <label for="attachment">Optional attachment</label>
+    <input id="attachment" name="attachment" type="file">
+    <button type="submit">Post Message</button>
+  </form>
+</div>
+
+<div class="card">
+  <div style="display:flex;justify-content:space-between;align-items:center">
+    <h2 style="margin:0">Threads</h2>
+    <div class="meta">
+      <a href="/b/{{ board.slug }}?state=open">Open</a> ·
+      <a href="/b/{{ board.slug }}?state=closed">Closed</a> ·
+      <a href="/b/{{ board.slug }}?state=all">All</a>
+    </div>
+  </div>
+  {% if not threads %}
+    <p class="meta">No threads in this filter.</p>
+  {% else %}
+    <div class="table-wrap" style="margin-top:0.5rem">
+      <table class="data-table">
+        <thead>
+          <tr><th>Thread</th><th>Messages</th><th>Last Seq</th><th>Last Activity</th></tr>
+        </thead>
+        <tbody>
+          {% for t in threads %}
+          <tr>
+            <td>
+              <a href="/b/{{ board.slug }}/t/{{ t.id }}"><strong>{{ t.title }}</strong></a>
+              {% if t.closed_at %}<span class="badge">closed</span>{% endif %}
+            </td>
+            <td>{{ t.message_count }}</td>
+            <td>#{{ t.last_seq }}</td>
+            <td class="meta">{{ t.last_activity_at | chicago_time }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% endif %}
+</div>
+{% endblock %}

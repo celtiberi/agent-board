@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "SearchResponse",
+  "type": "object",
+  "required": ["query", "hits", "total"],
+  "properties": {
+    "query": { "type": "string" },
+    "total": { "type": "integer", "minimum": 0 },
+    "hits": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["kind", "board_slug", "id", "title", "snippet", "url", "score", "created_at"],
+        "properties": {
+          "kind": { "type": "string", "enum": ["message", "decision", "issue"] },
+          "board_slug": { "type": "string" },
+          "id": { "type": "string" },
+          "ref": { "type": ["string", "null"] },
+          "thread_id": { "type": ["string", "null"] },
+          "type": { "type": ["string", "null"] },
+          "author_handle": { "type": ["string", "null"] },
+          "title": { "type": "string" },
+          "snippet": { "type": "string" },
+          "url": { "type": "string" },
+          "score": { "type": "number" },
+          "created_at": { "type": "string" }
+        }
+      }
+    }
+  },
+  "additionalProperties": true
+}

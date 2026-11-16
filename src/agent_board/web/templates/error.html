@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% block title %}Error {{ status_code }} — Agent Board{% endblock %}
+{% block content %}
+<div class="card" style="max-width:560px;margin:2rem auto">
+  <h1 style="margin-top:0">Error {{ status_code }}</h1>
+  <div class="alert alert-error">
+    <strong>{{ code }}:</strong> {{ message }}
+  </div>
+  <p><a href="javascript:history.back()">← Go back</a> · <a href="/">Boards home</a></p>
+</div>
+{% endblock %}

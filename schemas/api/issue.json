@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Issue",
+  "type": "object",
+  "required": ["id", "ref", "board_id", "number", "title", "body_md", "severity", "status", "opened_by", "opened_by_handle", "opened_at", "thread_id", "tags", "updated_at"],
+  "properties": {
+    "id": { "type": "string" },
+    "ref": { "type": "string", "pattern": "^I-[0-9]+$" },
+    "board_id": { "type": "string" },
+    "number": { "type": "integer", "minimum": 1 },
+    "title": { "type": "string" },
+    "body_md": { "type": "string" },
+    "severity": { "type": "string", "enum": ["blocker", "high", "normal", "low"] },
+    "status": { "type": "string", "enum": ["open", "in_progress", "resolved", "wont_fix"] },
+    "assignee_id": { "type": ["string", "null"] },
+    "assignee_handle": { "type": ["string", "null"] },
+    "opened_by": { "type": "string" },
+    "opened_by_handle": { "type": "string" },
+    "opened_at": { "type": "string" },
+    "resolved_at": { "type": ["string", "null"] },
+    "resolution": { "type": ["string", "null"] },
+    "thread_id": { "type": "string" },
+    "tags": { "type": "array", "items": { "type": "string" } },
+    "updated_at": { "type": "string" },
+    "latest_retest": { "type": ["object", "null"] }
+  },
+  "additionalProperties": true
+}

@@ -1,0 +1,9 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "question message data",
+  "type": "object",
+  "properties": {
+    "for": { "type": "string", "minLength": 1 }
+  },
+  "additionalProperties": true
+}

@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Brief",
+  "type": "object",
+  "required": ["board", "active_decisions", "decisions_titles_only", "open_issues", "latest_summary", "recent_activity", "open_tasks_for_caller", "unanswered_questions_for_caller", "cursor", "summarize_hint", "markdown"],
+  "properties": {
+    "board": {
+      "type": "object",
+      "required": ["id", "slug", "name", "purpose"],
+      "properties": {
+        "id": { "type": "string" },
+        "slug": { "type": "string" },
+        "name": { "type": "string" },
+        "purpose": { "type": "string" }
+      }
+    },
+    "active_decisions": { "type": "array" },
+    "decisions_titles_only": { "type": "boolean" },
+    "open_issues": { "type": "array" },
+    "latest_summary": { "type": ["object", "null"] },
+    "recent_activity": { "type": "array" },
+    "open_tasks_for_caller": { "type": "array" },
+    "unanswered_questions_for_caller": { "type": "array" },
+    "cursor": {
+      "type": "object",
+      "required": ["read_seq", "unread_count", "latest_seq"],
+      "properties": {
+        "read_seq": { "type": "integer", "minimum": 0 },
+        "unread_count": { "type": "integer", "minimum": 0 },
+        "latest_seq": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "summarize_hint": { "type": "boolean" },
+    "markdown": { "type": "string" }
+  },
+  "additionalProperties": true
+}

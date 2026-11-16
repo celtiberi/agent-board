@@ -1,0 +1,95 @@
+{% extends "base.html" %}
+{% block title %}Issues — {{ board.name }}{% endblock %}
+{% block content %}
+<div class="subnav">
+  <a href="/b/{{ board.slug }}">Brief &amp; Threads</a>
+  <a href="/b/{{ board.slug }}/decisions">Decisions</a>
+  <a href="/b/{{ board.slug }}/issues" class="active">Issues</a>
+</div>
+
+<h1>Issues — {{ board.name }}</h1>
+
+<div class="card">
+  <h2 style="margin-top:0">Open Issue</h2>
+  <form method="post" action="/b/{{ board.slug }}/issues">
+    <input type="hidden" name="csrf_token" value="{{ ctx.csrf_token }}">
+    <div class="row">
+      <div>
+        <label for="title">Title</label>
+        <input id="title" name="title" type="text" value="{{ prefill_title or '' }}" required>
+      </div>
+      <div>
+        <label for="severity">Severity</label>
+        <select id="severity" name="severity">
+          <option value="blocker">blocker</option>
+          <option value="high">high</option>
+          <option value="normal" selected>normal</option>
+          <option value="low">low</option>
+        </select>
+      </div>
+      <div>
+        <label for="assignee">Assignee (optional handle)</label>
+        <input id="assignee" name="assignee" type="text" placeholder="e.g. mac-dev-ai">
+      </div>
+    </div>
+    <label for="body_md">Description (Markdown)</label>
+    <textarea id="body_md" name="body_md" required>{{ prefill_body or '' }}</textarea>
+    <button type="submit">Open Issue</button>
+  </form>
+</div>
+
+<div class="card">
+  <form method="get" action="/b/{{ board.slug }}/issues" class="row" style="align-items:end">
+    <div>
+      <label for="status">Status</label>
+      <select id="status" name="status">
+        {% for s in ['active', 'open', 'in_progress', 'resolved', 'wont_fix', 'all'] %}
+          <option value="{{ s }}" {% if status == s %}selected{% endif %}>{{ s }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div>
+      <label for="fsev">Severity</label>
+      <select id="fsev" name="severity">
+        <option value="">all</option>
+        {% for sev in ['blocker', 'high', 'normal', 'low'] %}
+          <option value="{{ sev }}" {% if severity == sev %}selected{% endif %}>{{ sev }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div>
+      <button type="submit" class="sm">Filter</button>
+    </div>
+  </form>
+
+  {% if not issues %}
+    <p class="meta" style="margin-top:0.75rem">No matching issues.</p>
+  {% else %}
+    <div class="table-wrap" style="margin-top:0.75rem">
+      <table class="data-table">
+        <thead>
+          <tr><th>ID</th><th>Severity</th><th>Status</th><th>Title</th><th>Assignee</th><th>Latest Retest</th></tr>
+        </thead>
+        <tbody>
+          {% for i in issues %}
+          <tr>
+            <td><a href="/b/{{ board.slug }}/issues/{{ i.ref }}"><strong>{{ i.ref }}</strong></a></td>
+            <td><span class="badge badge-{{ i.severity }}">{{ i.severity }}</span></td>
+            <td><span class="badge">{{ i.status }}</span></td>
+            <td><a href="/b/{{ board.slug }}/issues/{{ i.ref }}">{{ i.title }}</a></td>
+            <td>{{ i.assignee_handle or '—' }}</td>
+            <td class="meta">
+              {% if i.latest_retest %}
+                {{ i.latest_retest.passed }} pass / {{ i.latest_retest.failed }} fail
+              {% else %}
+                —
+              {% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% endif %}
+</div>
+{% endblock %}

@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "issue message data",
+  "type": "object",
+  "properties": {
+    "issue_id": { "type": "string", "minLength": 1 },
+    "action": {
+      "type": "string",
+      "enum": ["opened", "status_changed", "assigned", "commented", "resolved", "reopened"]
+    }
+  },
+  "additionalProperties": true
+}

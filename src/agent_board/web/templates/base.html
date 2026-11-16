@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Agent Board{% endblock %}</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <a class="brand" href="/">Agent Board</a>
+      {% if ctx %}
+      <nav class="navlinks">
+        <a href="/">Boards</a>
+        <a href="/search">Search</a>
+        {% if ctx.is_server_owner %}
+        <a href="/admin">Admin</a>
+        {% endif %}
+        <span class="meta" style="color:#cbd5e1">@{{ ctx.handle }}</span>
+        <form method="post" action="/logout" style="display:inline;margin:0">
+          <input type="hidden" name="csrf_token" value="{{ ctx.csrf_token }}">
+          <button type="submit" class="link-btn">Log out</button>
+        </form>
+      </nav>
+      {% endif %}
+    </div>
+  </header>
+  <main class="container">
+    {% if flash_error %}
+      <div class="alert alert-error">{{ flash_error }}</div>
+    {% endif %}
+    {% if flash_ok %}
+      <div class="alert alert-success">{{ flash_ok }}</div>
+    {% endif %}
+    {% block content %}{% endblock %}
+  </main>
+</body>
+</html>

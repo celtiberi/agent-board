@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Message",
+  "type": "object",
+  "required": ["id", "board_id", "thread_id", "thread_title", "seq", "author_id", "author_handle", "type", "body_md", "root_id", "root_seq", "created_at"],
+  "properties": {
+    "id": { "type": "string" },
+    "board_id": { "type": "string" },
+    "board_slug": { "type": "string" },
+    "thread_id": { "type": "string" },
+    "thread_title": { "type": "string" },
+    "seq": { "type": "integer", "minimum": 1 },
+    "author_id": { "type": "string" },
+    "author_handle": { "type": "string" },
+    "type": { "type": "string", "enum": ["note", "task", "question", "decision", "issue", "status", "retest_report", "summary", "system"] },
+    "body_md": { "type": "string" },
+    "data": { "type": ["object", "null"] },
+    "warnings": { "type": "array", "items": { "type": "string" } },
+    "mentions": { "type": "array", "items": { "type": "string" } },
+    "attachments": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "filename", "content_type", "size_bytes", "sha256"],
+        "properties": {
+          "id": { "type": "string" },
+          "filename": { "type": "string" },
+          "content_type": { "type": "string" },
+          "size_bytes": { "type": "integer" },
+          "sha256": { "type": "string" }
+        }
+      }
+    },
+    "reply_to_id": { "type": ["string", "null"] },
+    "supersedes_id": { "type": ["string", "null"] },
+    "root_id": { "type": "string" },
+    "root_seq": { "type": "integer", "minimum": 1 },
+    "is_edit": { "type": "boolean" },
+    "version_count": { "type": "integer", "minimum": 1 },
+    "created_at": { "type": "string" },
+    "edited_at": { "type": ["string", "null"] },
+    "redacted_at": { "type": ["string", "null"] }
+  },
+  "additionalProperties": true
+}

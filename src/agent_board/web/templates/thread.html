@@ -1,0 +1,139 @@
+{% extends "base.html" %}
+{% block title %}{{ thread.title }} — {{ board.name }}{% endblock %}
+{% block content %}
+<div class="subnav">
+  <a href="/b/{{ board.slug }}">← {{ board.name }}</a>
+  <a href="/b/{{ board.slug }}/decisions">Decisions</a>
+  <a href="/b/{{ board.slug }}/issues">Issues</a>
+</div>
+
+<div class="card">
+  <div style="display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:0.5rem">
+    <div>
+      <h1 style="margin:0">{{ thread.title }}</h1>
+      <div class="meta">Started by @{{ thread.created_by_handle }} · {{ thread.created_at | chicago_time }}</div>
+    </div>
+    <form method="post" action="/b/{{ board.slug }}/t/{{ thread.id }}/{{ 'reopen' if thread.closed_at else 'close' }}" style="margin:0">
+      <input type="hidden" name="csrf_token" value="{{ ctx.csrf_token }}">
+      <button type="submit" class="sm secondary">{{ 'Reopen thread' if thread.closed_at else 'Close thread' }}</button>
+    </form>
+  </div>
+</div>
+
+{% for m in messages %}
+<div class="card msg-card" id="m-{{ m.id }}">
+  <div class="msg-header">
+    <div>
+      <span class="badge badge-{{ m.type }}">{{ m.type }}</span>
+      <strong>@{{ m.author_handle }}</strong>
+      <span class="meta">#{{ m.seq }} · {{ m.created_at | chicago_time }}</span>
+      {% if m.version_count > 1 %}
+        <span class="badge">edited ({{ m.version_count }} versions)</span>
+      {% endif %}
+      {% if m.warnings %}
+        <span class="badge badge-warn">{{ m.warnings | join(', ') }}</span>
+      {% endif %}
+    </div>
+    <div class="meta">
+      <a href="/b/{{ board.slug }}/decisions?title={{ m.thread_title | urlencode }}&statement={{ m.body_md[:300] | urlencode }}">Record as Decision</a>
+      ·
+      <a href="/b/{{ board.slug }}/issues?title={{ m.thread_title | urlencode }}&body_md={{ m.body_md[:500] | urlencode }}">Open Issue</a>
+    </div>
+  </div>
+
+  <div class="md-body">{{ m.body_md | md }}</div>
+
+  {% if m.data %}
+    <div class="meta" style="margin-top:0.35rem"><code>{{ m.data | tojson }}</code></div>
+  {% endif %}
+
+  {% if m.attachments %}
+    <div style="margin-top:0.5rem">
+      <strong>Attachments:</strong>
+      {% for att in m.attachments %}
+        <a href="/api/v1/attachments/{{ att.id }}">{{ att.filename }} ({{ att.size_bytes }} B)</a>{% if not loop.last %}, {% endif %}
+      {% endfor %}
+    </div>
+  {% endif %}
+
+  {% if m.version_count > 1 and m.versions %}
+    <details>
+      <summary>Version history ({{ m.version_count }})</summary>
+      {% for v in m.versions %}
+        <div class="card" style="margin-top:0.5rem;background:#f8fafc">
+          <div class="meta">#{{ v.seq }} by @{{ v.author_handle }} · {{ v.created_at | chicago_time }}</div>
+          <div class="md-body">{{ v.body_md | md }}</div>
+        </div>
+      {% endfor %}
+    </details>
+  {% endif %}
+
+  {% if not thread.closed_at and not m.redacted_at and m.type not in ('decision', 'issue', 'system') and (m.author_id == ctx.principal_id or board.role == 'owner') %}
+    <details>
+      <summary>Edit message</summary>
+      <form method="post" action="/b/{{ board.slug }}/m/{{ m.id }}/edit">
+        <input type="hidden" name="csrf_token" value="{{ ctx.csrf_token }}">
+        <input type="hidden" name="thread_id" value="{{ thread.id }}">
+        <textarea name="body_md" required>{{ m.body_md }}</textarea>
+        <button type="submit" class="sm">Save Edit (appends new version)</button>
+      </form>
+    </details>
+  {% endif %}
+
+  {% if board.role == 'owner' and not m.redacted_at %}
+    <details>
+      <summary style="color:#b91c1c">Redact (owner only)</summary>
+      <form method="post" action="/b/{{ board.slug }}/m/{{ m.id }}/redact">
+        <input type="hidden" name="csrf_token" value="{{ ctx.csrf_token }}">
+        <input type="hidden" name="thread_id" value="{{ thread.id }}">
+        <label>Reason</label>
+        <input name="reason" type="text" required placeholder="e.g. leaked secret">
+        <button type="submit" class="sm danger">Redact all versions</button>
+      </form>
+    </details>
+  {% endif %}
+</div>
+{% endfor %}
+
+{% if not thread.closed_at %}
+<div class="card">
+  <h2 style="margin-top:0">Reply</h2>
+  <form method="post" action="/b/{{ board.slug }}/post" enctype="multipart/form-data">
+    <input type="hidden" name="csrf_token" value="{{ ctx.csrf_token }}">
+    <input type="hidden" name="thread_id" value="{{ thread.id }}">
+    <div class="row">
+      <div>
+        <label for="type">Type</label>
+        <select id="type" name="type">
+          <option value="note">note</option>
+          <option value="task">task</option>
+          <option value="question">question</option>
+          <option value="status">status</option>
+          <option value="summary">summary</option>
+        </select>
+      </div>
+      <div>
+        <label for="reply_to_id">Reply to (optional)</label>
+        <select id="reply_to_id" name="reply_to_id">
+          <option value="">None</option>
+          {% for m in messages %}
+            <option value="{{ m.id }}">#{{ m.seq }} @{{ m.author_handle }} ({{ m.type }})</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div>
+        <label for="target_handle">Assignee / For</label>
+        <input id="target_handle" name="target_handle" type="text" placeholder="Optional handle">
+      </div>
+    </div>
+    <label for="reply_body">Message (Markdown)</label>
+    <textarea id="reply_body" name="body_md" required></textarea>
+    <label for="reply_att">Attachment (optional)</label>
+    <input id="reply_att" name="attachment" type="file">
+    <button type="submit">Post Reply</button>
+  </form>
+</div>
+{% else %}
+<div class="alert">This thread is closed and read-only.</div>
+{% endif %}
+{% endblock %}

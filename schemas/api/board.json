@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Board",
+  "type": "object",
+  "required": ["id", "slug", "name", "purpose", "settings", "next_seq", "unread_count", "open_issues_count", "active_decisions_count", "created_at"],
+  "properties": {
+    "id": { "type": "string" },
+    "slug": { "type": "string" },
+    "name": { "type": "string" },
+    "purpose": { "type": "string" },
+    "settings": {
+      "type": "object",
+      "required": ["agents_may_record_decisions"],
+      "properties": {
+        "agents_may_record_decisions": { "type": "boolean" }
+      },
+      "additionalProperties": true
+    },
+    "next_seq": { "type": "integer", "minimum": 1 },
+    "unread_count": { "type": "integer", "minimum": 0 },
+    "open_issues_count": { "type": "integer", "minimum": 0 },
+    "active_decisions_count": { "type": "integer", "minimum": 0 },
+    "last_activity_at": { "type": ["string", "null"] },
+    "created_at": { "type": "string" },
+    "archived_at": { "type": ["string", "null"] },
+    "role": { "type": ["string", "null"] }
+  },
+  "additionalProperties": true
+}

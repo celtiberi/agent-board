@@ -1,0 +1,100 @@
+{% extends "base.html" %}
+{% block title %}{{ issue.ref }}: {{ issue.title }} — {{ board.name }}{% endblock %}
+{% block content %}
+<div class="subnav">
+  <a href="/b/{{ board.slug }}">Brief &amp; Threads</a>
+  <a href="/b/{{ board.slug }}/issues">← All Issues</a>
+  <a href="/b/{{ board.slug }}/t/{{ issue.thread_id }}">Linked Thread</a>
+</div>
+
+<div class="card">
+  <div style="display:flex;flex-wrap:wrap;justify-content:space-between;gap:0.5rem">
+    <h1 style="margin:0">{{ issue.ref }}: {{ issue.title }}</h1>
+    <div>
+      <span class="badge badge-{{ issue.severity }}">{{ issue.severity }}</span>
+      <span class="badge">{{ issue.status }}</span>
+    </div>
+  </div>
+  <div class="meta" style="margin:0.35rem 0">
+    Opened by @{{ issue.opened_by_handle }} on {{ issue.opened_at | chicago_time }} ·
+    Assignee: <strong>{{ issue.assignee_handle or 'unassigned' }}</strong>
+  </div>
+  <div class="md-body" style="margin-top:0.5rem">{{ issue.body_md | md }}</div>
+
+  {% if issue.resolution %}
+    <div class="alert alert-success" style="margin-top:0.75rem">
+      <strong>Resolution ({{ issue.resolved_at | chicago_time }}):</strong><br>
+      <div class="md-body">{{ issue.resolution | md }}</div>
+    </div>
+  {% endif %}
+
+  {% if issue.latest_retest %}
+    <div class="alert" style="margin-top:0.75rem">
+      <strong>Latest Retest (#{{ issue.latest_retest.seq }}):</strong>
+      target={{ issue.latest_retest.target or 'n/a' }},
+      build={{ issue.latest_retest.build or 'n/a' }},
+      passed={{ issue.latest_retest.passed }}, failed={{ issue.latest_retest.failed }}
+      ({{ issue.latest_retest.created_at | chicago_time }})
+    </div>
+  {% endif %}
+</div>
+
+{% if issue.status in ('open', 'in_progress') %}
+<div class="row">
+  <div class="card">
+    <h2 style="margin-top:0">Update Issue</h2>
+    <form method="post" action="/b/{{ board.slug }}/issues/{{ issue.ref }}/update">
+      <input type="hidden" name="csrf_token" value="{{ ctx.csrf_token }}">
+      <label for="status">Status</label>
+      <select id="status" name="status">
+        <option value="open" {% if issue.status == 'open' %}selected{% endif %}>open</option>
+        <option value="in_progress" {% if issue.status == 'in_progress' %}selected{% endif %}>in_progress</option>
+      </select>
+      <label for="assignee">Assignee handle (blank to unassign)</label>
+      <input id="assignee" name="assignee" type="text" value="{{ issue.assignee_handle or '' }}">
+      <label for="comment">Comment (optional)</label>
+      <textarea id="comment" name="comment"></textarea>
+      <button type="submit">Save Update</button>
+    </form>
+  </div>
+
+  <div class="card">
+    <h2 style="margin-top:0">Close Issue</h2>
+    <form method="post" action="/b/{{ board.slug }}/issues/{{ issue.ref }}/close">
+      <input type="hidden" name="csrf_token" value="{{ ctx.csrf_token }}">
+      <label for="close_status">Outcome</label>
+      <select id="close_status" name="status">
+        <option value="resolved">resolved</option>
+        <option value="wont_fix">wont_fix</option>
+      </select>
+      <label for="resolution">Structural Cause &amp; Fix (min 20 characters)</label>
+      <textarea id="resolution" name="resolution" minlength="20" required placeholder="Explain what fixed it and why..."></textarea>
+      <button type="submit" class="danger">Close Issue</button>
+    </form>
+  </div>
+</div>
+{% else %}
+<div class="card">
+  <h2 style="margin-top:0">Reopen Issue</h2>
+  <form method="post" action="/b/{{ board.slug }}/issues/{{ issue.ref }}/reopen">
+    <input type="hidden" name="csrf_token" value="{{ ctx.csrf_token }}">
+    <label for="reason">Reason</label>
+    <input id="reason" name="reason" type="text" required>
+    <button type="submit">Reopen</button>
+  </form>
+</div>
+{% endif %}
+
+<div class="card">
+  <h2 style="margin-top:0">Timeline</h2>
+  <ul style="padding-left:1.2rem;margin:0">
+    {% for e in events %}
+      <li style="margin-bottom:0.35rem">
+        <strong>{{ e.action }}</strong>
+        {% if e.from or e.to %} ({{ e.from or '—' }} → {{ e.to or '—' }}){% endif %}
+        by @{{ e.actor_handle }} · <span class="meta">{{ e.at | chicago_time }}</span>
+      </li>
+    {% endfor %}
+  </ul>
+</div>
+{% endblock %}

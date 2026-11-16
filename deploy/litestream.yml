@@ -1,0 +1,13 @@
+# Optional off-machine SQLite replication to Cloudflare R2 via Litestream.
+# Provide LITESTREAM_ACCESS_KEY_ID and LITESTREAM_SECRET_ACCESS_KEY in the host environment.
+
+dbs:
+  - path: /Users/<username>/agent-board-data/board.db
+    replicas:
+      - type: s3
+        bucket: agent-board-backups
+        path: board.db
+        endpoint: https://<CLOUDFLARE_ACCOUNT_ID>.r2.cloudflarestorage.com
+        region: auto
+        retention: 168h
+        sync-interval: 10s

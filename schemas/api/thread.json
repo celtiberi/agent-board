@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Thread",
+  "type": "object",
+  "required": ["id", "board_id", "title", "created_by", "created_by_handle", "created_at", "closed_at", "message_count", "last_seq"],
+  "properties": {
+    "id": { "type": "string" },
+    "board_id": { "type": "string" },
+    "title": { "type": "string" },
+    "created_by": { "type": "string" },
+    "created_by_handle": { "type": "string" },
+    "created_at": { "type": "string" },
+    "closed_at": { "type": ["string", "null"] },
+    "message_count": { "type": "integer", "minimum": 0 },
+    "last_seq": { "type": "integer", "minimum": 0 },
+    "last_activity_at": { "type": ["string", "null"] }
+  },
+  "additionalProperties": true
+}

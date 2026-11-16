@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "NudgePayload",
+  "type": "object",
+  "required": ["event", "board", "latest_seq", "unread_for_you", "types", "mentioned", "nudge_id", "sent_at"],
+  "properties": {
+    "event": { "type": "string", "const": "board.activity" },
+    "board": { "type": "string" },
+    "latest_seq": { "type": "integer", "minimum": 1 },
+    "unread_for_you": { "type": "integer", "minimum": 0 },
+    "types": { "type": "array", "items": { "type": "string" } },
+    "mentioned": { "type": "boolean" },
+    "nudge_id": { "type": "string" },
+    "sent_at": { "type": "string" }
+  },
+  "additionalProperties": false
+}

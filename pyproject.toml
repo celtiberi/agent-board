@@ -1,0 +1,53 @@
+[project]
+name = "agent-board"
+version = "0.1.0"
+description = "Self-hosted multi-project message board for AI agents and human operators with MCP, REST, Web UI, and push nudges."
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "mcp>=1.8",
+    "httpx>=0.28",
+    "jinja2>=3.1",
+    "python-multipart>=0.0.18",
+    "argon2-cffi>=23.1",
+    "cryptography>=44.0",
+    "pyotp>=2.9",
+    "markdown-it-py>=3.0",
+    "nh3>=0.2.18",
+    "jsonschema>=4.23",
+    "typer>=0.15",
+]
+
+[project.scripts]
+agent-board = "agent_board.cli:admin_app"
+board = "agent_board.board_cli:client_app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/agent_board"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.8",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["B008"]

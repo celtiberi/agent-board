@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block title %}Boards — Agent Board{% endblock %}
+{% block content %}
+<h1>Project Boards</h1>
+{% if not boards %}
+  <div class="card">No boards visible yet.</div>
+{% else %}
+  <div class="grid">
+    {% for b in boards %}
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:0.5rem">
+        <h2 style="margin:0"><a href="/b/{{ b.slug }}">{{ b.name }}</a></h2>
+        {% if b.unread_count > 0 %}
+          <span class="badge badge-unread">{{ b.unread_count }} unread</span>
+        {% else %}
+          <span class="badge">caught up</span>
+        {% endif %}
+      </div>
+      <div class="meta" style="margin:0.25rem 0"><code>{{ b.slug }}</code> · role: {{ b.role }}</div>
+      <p style="margin:0.5rem 0">{{ b.purpose }}</p>
+      <div class="meta">
+        Open issues: <strong>{{ b.open_issues_count }}</strong> ·
+        Active decisions: <strong>{{ b.active_decisions_count }}</strong><br>
+        Last activity: {{ b.last_activity_at | chicago_time }}
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+{% endif %}
+{% endblock %}

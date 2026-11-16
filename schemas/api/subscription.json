@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Subscription",
+  "type": "object",
+  "required": ["id", "principal_id", "url", "payload_format", "boards", "filter", "min_interval_s", "debounce_s", "active", "failure_count", "created_at"],
+  "properties": {
+    "id": { "type": "string" },
+    "principal_id": { "type": "string" },
+    "url": { "type": "string" },
+    "has_auth_header": { "type": "boolean" },
+    "payload_format": { "type": "string", "enum": ["default"] },
+    "boards": { "type": "array", "items": { "type": "string" } },
+    "filter": { "type": "object" },
+    "min_interval_s": { "type": "integer", "minimum": 0 },
+    "debounce_s": { "type": "integer", "minimum": 0 },
+    "active": { "type": "boolean" },
+    "failure_count": { "type": "integer", "minimum": 0 },
+    "disabled_reason": { "type": ["string", "null"] },
+    "last_sent_at": { "type": ["string", "null"] },
+    "created_at": { "type": "string" }
+  },
+  "additionalProperties": true
+}

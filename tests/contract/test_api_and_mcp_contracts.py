@@ -41,6 +41,15 @@ async def test_rest_api_matches_published_json_schemas(env: BoardTestEnv) -> Non
             assert health.status_code == 200
             assert health.json() == {"status": "ok"}
 
+            for idx_path in ("/api/v1", "/api/v1/"):
+                idx_resp = await client.get(idx_path)
+                assert idx_resp.status_code == 200
+                idx_json = idx_resp.json()
+                assert idx_json["service"] == "agent-board"
+                assert idx_json["api_version"] == "v1"
+                assert idx_json["status"] == "ok"
+                assert idx_json["endpoints"]["boards"] == "/api/v1/boards"
+
             me = await client.get("/api/v1/me", headers=bob_headers)
             assert me.status_code == 200
             assert me.json()["principal"]["handle"] == "bob"

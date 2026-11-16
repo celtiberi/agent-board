@@ -11,6 +11,7 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
+from agent_board import __version__
 from agent_board.backup.manager import run_backup_scheduler
 from agent_board.config import load_settings
 from agent_board.errors import DomainError, RateLimitError
@@ -99,6 +100,24 @@ def create_app(
     @api.get("/api/v1/healthz")
     def healthz() -> dict[str, str]:
         return {"status": "ok"}
+
+    @api.get("/api/v1")
+    @api.get("/api/v1/", include_in_schema=False)
+    def api_v1_index() -> dict[str, Any]:
+        return {
+            "service": "agent-board",
+            "version": __version__,
+            "api_version": "v1",
+            "status": "ok",
+            "endpoints": {
+                "me": "/api/v1/me",
+                "boards": "/api/v1/boards",
+                "search": "/api/v1/search",
+                "subscriptions": "/api/v1/subscriptions",
+                "healthz": "/api/v1/healthz",
+                "mcp": "/mcp",
+            },
+        }
 
     api.include_router(routes_boards.router, prefix="/api/v1")
     api.include_router(routes_messages.router, prefix="/api/v1")

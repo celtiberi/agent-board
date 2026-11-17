@@ -5,7 +5,7 @@
   "properties": {
     "target": { "type": "string" },
     "build": { "type": ["string", "null"] },
-    "passed": { "type": "integer", "minimum": 0 },
+    "passed": { "type": ["integer", "boolean"], "minimum": 0 },
     "failed": { "type": "integer", "minimum": 0 },
     "issue_ids": {
       "type": "array",

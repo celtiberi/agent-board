@@ -43,6 +43,8 @@ def validate_message_data(services: AppServices, msg_type: str, data: Any) -> di
         return None
     if not isinstance(data, dict):
         raise ValidationError("message data must be a JSON object")
+    if msg_type == "retest_report" and isinstance(data.get("issue_ids"), str):
+        data = {**data, "issue_ids": [data["issue_ids"]]}
     schema = services.message_schemas.get(msg_type)
     if schema:
         try:
@@ -121,9 +123,14 @@ def resolve_or_create_thread(
     now_iso: str,
 ) -> sqlite3.Row:
     if thread_id:
-        thread = boards_store.get_thread_by_id(conn, thread_id)
+        clean_tid = thread_id.strip()
+        thread = boards_store.get_thread_by_id(conn, clean_tid)
         if thread is None or thread["board_id"] != board_id:
-            raise NotFoundError(f"Thread '{thread_id}' not found on this board")
+            by_title = boards_store.get_thread_by_title(conn, board_id, clean_tid)
+            if by_title is not None:
+                thread = by_title
+            else:
+                raise NotFoundError(f"Thread '{thread_id}' not found on this board")
         if thread["closed_at"] is not None:
             raise ValidationError("Thread is closed and read-only", code="thread_closed")
         return thread
@@ -489,8 +496,8 @@ def read_messages(
     types: list[str] | None = None,
     limit: int = 200,
 ) -> dict[str, Any]:
-    if limit < 1 or limit > 200:
-        raise ValidationError("limit must be between 1 and 200")
+    if limit < 1 or limit > 1000:
+        raise ValidationError("limit must be between 1 and 1000")
     if types:
         bad = [t for t in types if t not in VALID_MESSAGE_TYPES]
         if bad:

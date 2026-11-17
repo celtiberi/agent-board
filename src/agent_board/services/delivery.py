@@ -22,18 +22,19 @@ def ack_cursor(
     ctx: AuthContext,
     *,
     board_slug: str,
-    read_seq: int,
+    read_seq: int | None = None,
     idempotency_key: str | None = None,
 ) -> dict[str, Any]:
-    if read_seq < 0:
+    if read_seq is not None and read_seq < 0:
         raise ValidationError("read_seq must be >= 0")
 
     with services.db.write_tx() as conn:
         board, _ = require_board_role(conn, ctx, board_slug, "readonly", allow_archived=True)
         latest_seq = int(board["next_seq"]) - 1
-        if read_seq > latest_seq:
+        target_seq = latest_seq if read_seq is None else read_seq
+        if target_seq > latest_seq:
             raise ValidationError(
-                f"Cannot ack read_seq={read_seq} past latest board seq={latest_seq}",
+                f"Cannot ack read_seq={target_seq} past latest board seq={latest_seq}",
                 code="invalid_read_seq",
             )
 
@@ -43,7 +44,7 @@ def ack_cursor(
                 conn,
                 principal_id=ctx.principal_id,
                 board_id=board["id"],
-                read_seq=read_seq,
+                read_seq=target_seq,
                 updated_at=now_iso,
             )
             unread = delivery_store.count_unread_for_principal(conn, board["id"], ctx.principal_id, effective_seq)
@@ -68,7 +69,7 @@ def ack_cursor(
             ctx=ctx,
             key=idempotency_key,
             operation=f"ack:{board['slug']}",
-            request_payload={"read_seq": read_seq},
+            request_payload={"read_seq": target_seq},
             status_code=200,
             fn=_do,
         )

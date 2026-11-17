@@ -90,3 +90,72 @@ def test_seed_demo_and_backup_restore_drill(tmp_path: Path) -> None:
         assert len(backup_alerts) == 1
     finally:
         services.close()
+
+
+def test_backup_prunes_old_outbox_rows_and_keeps_recent(tmp_path: Path) -> None:
+    from agent_board.services import delivery as delivery_svc
+    from agent_board.store import delivery as delivery_store
+
+    settings = load_settings(data_dir=tmp_path / "data")
+    services = AppServices.create(settings)
+    try:
+        seed_demo_workspace(services)
+        owner_row = principals_store.get_first_server_owner(services.db.read_conn())
+        assert owner_row is not None
+        owner_ctx = AuthContext(
+            principal_id=owner_row["id"],
+            handle=owner_row["handle"],
+            kind="human",
+            display_name=owner_row["display_name"],
+            is_server_owner=True,
+            auth_kind="session",
+            board_scope=("*",),
+            max_role="owner",
+        )
+        sub = delivery_svc.create_subscription(
+            services, owner_ctx, url="https://example.invalid/hook", boards=["ops"]
+        )
+        ops = boards_svc.get_board(services, owner_ctx, board_slug="ops")
+        now = utc_now()
+        old_ts = dt_to_iso(now - timedelta(days=45))
+        recent_ts = dt_to_iso(now - timedelta(days=2))
+
+        with services.db.write_tx() as conn:
+            for idx, (status, ts) in enumerate(
+                [
+                    ("sent", old_ts),
+                    ("suppressed", old_ts),
+                    ("dead", old_ts),
+                    ("sent", recent_ts),
+                    ("pending", old_ts),
+                ],
+                start=1,
+            ):
+                delivery_store.enqueue_outbox_pending(
+                    conn,
+                    outbox_id=f"01TESTPRUNEOUTBOX00000000{idx}",
+                    subscription_id=sub["id"],
+                    board_id=ops["id"],
+                    latest_seq=idx,
+                    next_attempt_at=ts,
+                    created_at=ts,
+                )
+                if status != "pending":
+                    conn.execute(
+                        "UPDATE outbox SET status = ?, created_at = ? WHERE id = ?",
+                        (status, ts, f"01TESTPRUNEOUTBOX00000000{idx}"),
+                    )
+
+        assert services.db.read_conn().execute("SELECT COUNT(*) FROM outbox").fetchone()[0] == 5
+
+        res = run_backup(services, now=now)
+        assert res["ok"] is True
+        remaining = {
+            r["id"] for r in services.db.read_conn().execute("SELECT id FROM outbox").fetchall()
+        }
+        assert remaining == {
+            "01TESTPRUNEOUTBOX000000004",  # recent sent preserved
+            "01TESTPRUNEOUTBOX000000005",  # old pending preserved
+        }
+    finally:
+        services.close()

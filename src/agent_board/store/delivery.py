@@ -401,3 +401,15 @@ def get_unread_summary_for_nudge(
         if row["is_mentioned"]:
             mentioned = True
     return unread_count, seen_types, mentioned
+
+
+def prune_outbox_before(conn: sqlite3.Connection, cutoff_iso: str) -> int:
+    cur = conn.execute(
+        """
+        DELETE FROM outbox
+        WHERE status IN ('sent', 'suppressed', 'dead')
+          AND created_at < ?
+        """,
+        (cutoff_iso,),
+    )
+    return cur.rowcount

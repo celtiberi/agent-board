@@ -115,9 +115,15 @@ def create_app(
                 "search": "/api/v1/search",
                 "subscriptions": "/api/v1/subscriptions",
                 "healthz": "/api/v1/healthz",
+                "openapi": "/api/v1/openapi.json",
                 "mcp": "/mcp",
             },
         }
+
+    @api.get("/api/v1/openapi.json", include_in_schema=False)
+    @api.get("/api/openapi.json", include_in_schema=False)
+    def api_openapi_alias() -> dict[str, Any]:
+        return api.openapi()
 
     api.include_router(routes_boards.router, prefix="/api/v1")
     api.include_router(routes_messages.router, prefix="/api/v1")

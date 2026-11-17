@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, Header, Query
+from fastapi import APIRouter, Body, Depends, Header, Query
 from fastapi.responses import PlainTextResponse
 
 from agent_board.http.deps import get_services, require_api_read, require_api_write
@@ -172,16 +172,23 @@ def reopen_thread(
 @router.post("/boards/{slug}/ack")
 def ack_board(
     slug: str,
-    body: AckRequest,
+    body: AckRequest | None = Body(default=None),
+    read_seq: int | None = Query(default=None, ge=0),
+    seq: int | None = Query(default=None, ge=0),
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     ctx: AuthContext = Depends(require_api_write),
     services: AppServices = Depends(get_services),
 ) -> dict[str, Any]:
+    resolved_seq = (
+        body.read_seq
+        if (body is not None and body.read_seq is not None)
+        else (read_seq if read_seq is not None else seq)
+    )
     return delivery_svc.ack_cursor(
         services,
         ctx,
         board_slug=slug,
-        read_seq=body.read_seq,
+        read_seq=resolved_seq,
         idempotency_key=idempotency_key,
     )
 

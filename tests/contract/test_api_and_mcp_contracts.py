@@ -227,3 +227,118 @@ async def test_rest_api_matches_published_json_schemas(env: BoardTestEnv) -> Non
                 "subscriptions"
             ]
             assert sum(1 for s in subs_all if s["principal_handle"] == "new-qa") == 1
+
+
+async def test_agent_friendly_rest_aliases_and_membership_token_sync(env: BoardTestEnv) -> None:
+    app = create_app(env.services, enable_background_tasks=False)
+    bob_headers = {"Authorization": f"Bearer {env.bob_token}"}
+    owner_headers = {"Authorization": f"Bearer {env.owner_token}"}
+
+    async with app.app.router.lifespan_context(app.app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            idx = await client.get("/api/v1")
+            assert idx.status_code == 200
+            assert idx.json()["endpoints"]["openapi"] == "/api/v1/openapi.json"
+
+            for oa_path in ("/api/v1/openapi.json", "/api/openapi.json"):
+                oa = await client.get(oa_path)
+                assert oa.status_code == 200
+                assert "paths" in oa.json()
+
+            # Accept "body" alias, thread title in thread_id, boolean passed, and string issue_ids
+            post_resp = await client.post(
+                "/api/v1/boards/alpha/messages",
+                headers=bob_headers,
+                json={
+                    "thread_id": "general",
+                    "type": "retest_report",
+                    "body": "Retest passed via aliases",
+                    "data": {
+                        "target": "staging",
+                        "passed": True,
+                        "failed": 0,
+                        "issue_ids": "I-1",
+                    },
+                },
+            )
+            assert post_resp.status_code == 201, post_resp.text
+            posted = post_resp.json()
+            assert posted["thread_title"] == "general"
+            assert posted["data"]["issue_ids"] == ["I-1"]
+            assert posted["data"]["passed"] is True
+
+            # Raise read limit up to 1000
+            read_resp = await client.get("/api/v1/boards/alpha/messages?since_seq=0&limit=500", headers=bob_headers)
+            assert read_resp.status_code == 200
+
+            # Strip leading '@' in assignee and normalize 'medium' severity alias
+            iss_resp = await client.post(
+                "/api/v1/boards/alpha/issues",
+                headers=bob_headers,
+                json={
+                    "title": "Alias normalization issue",
+                    "body": "Opened with body alias and @bob assignee",
+                    "severity": "medium",
+                    "assignee": "@bob",
+                },
+            )
+            assert iss_resp.status_code == 201, iss_resp.text
+            iss = iss_resp.json()
+            assert iss["assignee_handle"] == "bob"
+            assert iss["severity"] == "normal"
+
+            # Flexible /ack: {"seq": N}, ?seq=N, and empty body defaulting to latest_seq
+            ack_seq = await client.post("/api/v1/boards/alpha/ack", headers=bob_headers, json={"seq": 1})
+            assert ack_seq.status_code == 200
+            assert ack_seq.json()["read_seq"] == 1
+
+            ack_qs = await client.post("/api/v1/boards/alpha/ack?seq=1", headers=bob_headers)
+            assert ack_qs.status_code == 200
+            assert ack_qs.json()["read_seq"] == 1
+
+            ack_empty = await client.post("/api/v1/boards/alpha/ack", headers=bob_headers)
+            assert ack_empty.status_code == 200
+            assert ack_empty.json()["read_seq"] == ack_empty.json()["latest_seq"]
+
+            # Onboard an agent on alpha, then expand/shrink membership and verify token board_scope sync
+            onboard_resp = await client.post(
+                "/api/v1/admin/onboard",
+                headers=owner_headers,
+                json={
+                    "handle": "sync-qa",
+                    "boards": ["alpha"],
+                    "role": "agent",
+                    "test_webhook": False,
+                },
+            )
+            assert onboard_resp.status_code == 201, onboard_resp.text
+            sync_token = onboard_resp.json()["token"]["token"]
+            sync_headers = {"Authorization": f"Bearer {sync_token}"}
+
+            beta_resp = await client.post(
+                "/api/v1/boards",
+                headers=owner_headers,
+                json={"slug": "beta", "name": "Beta", "purpose": "Scope sync test"},
+            )
+            assert beta_resp.status_code == 201
+
+            add_mem = await client.post(
+                "/api/v1/admin/memberships",
+                headers=owner_headers,
+                json={"board_slug": "beta", "principal_handle": "sync-qa", "role": "agent"},
+            )
+            assert add_mem.status_code == 200
+
+            visible_after_add = {
+                b["slug"] for b in (await client.get("/api/v1/boards", headers=sync_headers)).json()["boards"]
+            }
+            assert visible_after_add == {"alpha", "beta"}
+
+            rm_mem = await client.delete("/api/v1/admin/memberships/beta/sync-qa", headers=owner_headers)
+            assert rm_mem.status_code == 200
+
+            visible_after_rm = {
+                b["slug"] for b in (await client.get("/api/v1/boards", headers=sync_headers)).json()["boards"]
+            }
+            assert visible_after_rm == {"alpha"}

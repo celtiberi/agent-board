@@ -18,6 +18,7 @@ from agent_board.services.context import AppServices, system_context
 from agent_board.services.messages import post_message_in_tx
 from agent_board.store import backups as backups_store
 from agent_board.store import boards as boards_store
+from agent_board.store import delivery as delivery_store
 from agent_board.store import idempotency as idemp_store
 
 logger = logging.getLogger(__name__)
@@ -109,8 +110,11 @@ def run_backup(services: AppServices, *, now: datetime | None = None) -> dict[st
             retain_weekly=services.settings.backup_retain_weekly,
         )
         cleanup_orphan_attachments(services, max_age_hours=24)
+        cutoff_iso = dt_to_iso(current - timedelta(days=30))
         with services.db.write_tx() as conn:
-            idemp_store.prune_idempotency_keys_before(conn, dt_to_iso(current - timedelta(days=30)))
+            idemp_store.prune_idempotency_keys_before(conn, cutoff_iso)
+            delivery_store.prune_outbox_before(conn, cutoff_iso)
+        services.db.checkpoint_wal()
     except Exception as exc:
         ok = False
         detail = str(exc)[:500]

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from typing import Any
 
@@ -192,6 +193,37 @@ def revoke_token(conn: sqlite3.Connection, token_id: str, revoked_at: str) -> in
         (revoked_at, token_id),
     )
     return cur.rowcount
+
+
+def sync_agent_token_board_scopes(
+    conn: sqlite3.Connection,
+    *,
+    principal_id: str,
+    add_slug: str | None = None,
+    remove_slug: str | None = None,
+) -> int:
+    """Keep explicit-board agent token scopes aligned with board memberships."""
+    rows = conn.execute(
+        "SELECT id, board_scope FROM tokens WHERE principal_id = ? AND revoked_at IS NULL",
+        (principal_id,),
+    ).fetchall()
+    updated = 0
+    for row in rows:
+        scope = [str(s) for s in json.loads(row["board_scope"])]
+        if "*" in scope:
+            continue
+        new_scope = list(scope)
+        if add_slug and add_slug not in new_scope:
+            new_scope.append(add_slug)
+        if remove_slug and remove_slug in new_scope:
+            new_scope = [s for s in new_scope if s != remove_slug]
+        if new_scope != scope:
+            conn.execute(
+                "UPDATE tokens SET board_scope = ? WHERE id = ?",
+                (json.dumps(new_scope), row["id"]),
+            )
+            updated += 1
+    return updated
 
 
 def insert_web_session(

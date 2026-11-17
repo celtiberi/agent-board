@@ -17,6 +17,7 @@ from agent_board.store import issues as issues_store
 from agent_board.store import principals as principals_store
 
 VALID_SEVERITIES = ("blocker", "high", "normal", "low")
+SEVERITY_ALIASES = {"medium": "normal", "med": "normal", "critical": "blocker", "urgent": "blocker", "minor": "low"}
 VALID_ISSUE_STATUSES = ("open", "in_progress", "resolved", "wont_fix")
 CLOSED_ISSUE_STATUSES = ("resolved", "wont_fix")
 
@@ -24,7 +25,7 @@ CLOSED_ISSUE_STATUSES = ("resolved", "wont_fix")
 def _resolve_assignee(conn: sqlite3.Connection, assignee: str | None) -> sqlite3.Row | None:
     if assignee is None or not assignee.strip():
         return None
-    handle = assignee.strip().lower()
+    handle = assignee.strip().lstrip("@").lower()
     row = principals_store.get_principal_by_handle(conn, handle)
     if row is None:
         row = principals_store.get_principal_by_id(conn, assignee.strip())
@@ -110,7 +111,9 @@ def open_issue(
     clean_body = body_md.strip()
     if not clean_title or not clean_body:
         raise ValidationError("title and body_md are required")
-    if severity not in VALID_SEVERITIES:
+    norm_severity = severity.strip().lower()
+    clean_severity = SEVERITY_ALIASES.get(norm_severity, norm_severity)
+    if clean_severity not in VALID_SEVERITIES:
         raise ValidationError(f"severity must be one of {', '.join(VALID_SEVERITIES)}")
     clean_tags = [t.strip().lower() for t in (tags or []) if t.strip()]
 
@@ -150,7 +153,7 @@ def open_issue(
                 board=board,
                 thread_id=target_tid,
                 msg_type="issue",
-                body_md=f"**Opened {ref} [{severity}]: {clean_title}**{assignee_note}\n\n{clean_body}",
+                body_md=f"**Opened {ref} [{clean_severity}]: {clean_title}**{assignee_note}\n\n{clean_body}",
                 data={"issue_id": ref, "action": "opened"},
                 now_iso=now_iso,
             )
@@ -161,7 +164,7 @@ def open_issue(
                 number=num,
                 title=clean_title,
                 body_md=clean_body,
-                severity=severity,
+                severity=clean_severity,
                 assignee_id=assignee_row["id"] if assignee_row else None,
                 opened_by=ctx.principal_id,
                 thread_id=target_tid,

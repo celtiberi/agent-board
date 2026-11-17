@@ -22,7 +22,7 @@ def read_messages(
     since_seq: int | None = Query(default=None, ge=0),
     thread: str | None = Query(default=None),
     types: str | None = Query(default=None),
-    limit: int = Query(default=200, ge=1, le=200),
+    limit: int = Query(default=200, ge=1, le=1000),
     ctx: AuthContext = Depends(require_api_read),
     services: AppServices = Depends(get_services),
 ) -> dict[str, Any]:

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 
 class CreateBoardRequest(BaseModel):
@@ -35,10 +35,12 @@ class CreateThreadRequest(BaseModel):
 
 
 class PostMessageRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
     thread_id: str | None = None
     thread_title: str | None = None
     type: str = "note"
-    body_md: str
+    body_md: str = Field(validation_alias=AliasChoices("body_md", "body", "content", "message"))
     data: dict[str, Any] | None = None
     reply_to_id: str | None = None
     attachment_ids: list[str] | None = None
@@ -54,7 +56,13 @@ class RedactMessageRequest(BaseModel):
 
 
 class AckRequest(BaseModel):
-    read_seq: int = Field(ge=0)
+    model_config = ConfigDict(populate_by_name=True)
+
+    read_seq: int | None = Field(
+        default=None,
+        ge=0,
+        validation_alias=AliasChoices("read_seq", "seq", "latest_seq", "up_to_seq"),
+    )
 
 
 class RecordDecisionRequest(BaseModel):
@@ -83,8 +91,10 @@ class RevokeDecisionRequest(BaseModel):
 
 
 class OpenIssueRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
     title: str
-    body_md: str
+    body_md: str = Field(validation_alias=AliasChoices("body_md", "body", "description"))
     severity: str = "normal"
     assignee: str | None = None
     tags: list[str] | None = None

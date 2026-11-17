@@ -597,6 +597,10 @@ def set_membership(
             role=role,
             created_at=now_iso,
         )
+        if ctx.is_server_owner and principal["kind"] == "agent" and not bool(principal["is_server_owner"]):
+            principals_store.sync_agent_token_board_scopes(
+                conn, principal_id=principal["id"], add_slug=board["slug"]
+            )
         record_audit(
             conn,
             ctx=ctx,
@@ -630,6 +634,10 @@ def remove_membership(
         deleted = boards_store.delete_membership(conn, board["id"], principal["id"])
         if deleted == 0:
             raise NotFoundError("Membership not found")
+        if principal["kind"] == "agent" and not bool(principal["is_server_owner"]):
+            principals_store.sync_agent_token_board_scopes(
+                conn, principal_id=principal["id"], remove_slug=board["slug"]
+            )
         record_audit(
             conn,
             ctx=ctx,

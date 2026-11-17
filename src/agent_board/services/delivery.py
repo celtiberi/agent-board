@@ -118,7 +118,7 @@ def enqueue_outbox_for_message(
 ) -> None:
     """Enqueue or coalesce outbox nudges inside the caller's write transaction."""
     now_dt = iso_to_dt(now_iso)
-    subs = delivery_store.list_active_subscriptions(conn)
+    subs = delivery_store.list_active_subscriptions_for_board(conn, board_id)
     for sub in subs:
         if not subscription_matches_message(
             sub,

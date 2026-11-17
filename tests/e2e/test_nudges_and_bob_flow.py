@@ -17,8 +17,10 @@ from agent_board.app import create_app
 from agent_board.ids import dt_to_iso, new_ulid, utc_now
 from agent_board.nudger.signing import verify_nudge_signature
 from agent_board.nudger.worker import NudgeWorker
+from agent_board.services import boards as boards_svc
 from agent_board.services import delivery as delivery_svc
 from agent_board.services import messages as messages_svc
+from agent_board.services.auth import remove_membership, set_membership
 from tests.conftest import BoardTestEnv
 
 _NUDGE_SCHEMA = json.loads(
@@ -274,3 +276,68 @@ async def test_full_dev_ai_nudge_to_bob_mcp_reply_ack_flow(env: BoardTestEnv) ->
                     )
                     ack_res = await session.call_tool("ack", {"board": "alpha", "read_seq": posted_seq})
                     assert json.loads(ack_res.content[0].text)["read_seq"] == posted_seq
+
+
+async def test_wildcard_subscription_follows_board_memberships(env: BoardTestEnv) -> None:
+    received: list[dict[str, Any]] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        received.append(json.loads(request.content))
+        return httpx.Response(200, json={"ok": True})
+
+    sub = delivery_svc.create_subscription(
+        env.services,
+        env.bob_ctx,
+        url="https://grokbot.example/routine/wildcard",
+        boards=["*"],
+        filter_cfg={
+            "types": ["task", "question", "decision", "issue", "retest_report", "status"],
+            "mentions_only": False,
+            "exclude_self": True,
+        },
+        debounce_s=1,
+        min_interval_s=0,
+    )
+
+    boards_svc.create_board(
+        env.services,
+        env.owner_ctx,
+        slug="beta",
+        name="Beta Project",
+        purpose="Second board for membership gating test.",
+    )
+    set_membership(env.services, env.owner_ctx, board_slug="beta", principal_handle="mac-dev-ai", role="agent")
+
+    # Bob is not a member of beta or ops -> zero nudges enqueued/sent
+    messages_svc.post_message(
+        env.services, env.dev_ctx, board_slug="beta", msg_type="task", body_md="Task on beta before bob joins"
+    )
+    messages_svc.post_message(
+        env.services, env.owner_ctx, board_slug="ops", msg_type="task", body_md="Task on ops where bob is not a member"
+    )
+    worker = NudgeWorker(env.services, transport=httpx.MockTransport(_handler))
+    assert await worker.process_due_once(now=utc_now() + timedelta(seconds=2)) == 0
+    assert received == []
+
+    # Add Bob to beta -> wildcard subscription now fires on beta
+    set_membership(env.services, env.owner_ctx, board_slug="beta", principal_handle="bob", role="agent")
+    messages_svc.post_message(
+        env.services, env.dev_ctx, board_slug="beta", msg_type="task", body_md="Task on beta after bob joins"
+    )
+    assert await worker.process_due_once(now=utc_now() + timedelta(seconds=2)) == 1
+    assert len(received) == 1
+    assert received[-1]["board"] == "beta"
+
+    # Remove Bob from beta -> wildcard subscription stops firing on beta
+    remove_membership(env.services, env.owner_ctx, board_slug="beta", principal_handle="bob")
+    messages_svc.post_message(
+        env.services, env.dev_ctx, board_slug="beta", msg_type="task", body_md="Task on beta after bob removed"
+    )
+    assert await worker.process_due_once(now=utc_now() + timedelta(seconds=2)) == 0
+    assert len(received) == 1
+
+    # Omitting board_slug on send_test_nudge resolves to Bob's active board (alpha, not ops)
+    test_res = await worker.send_test_nudge(sub_id=sub["id"])
+    assert test_res["ok"] is True
+    assert len(received) == 2
+    assert received[-1]["board"] == "alpha"

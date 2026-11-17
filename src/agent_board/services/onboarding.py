@@ -214,7 +214,7 @@ async def onboard_agent(
             services,
             ctx,
             url=clean_webhook_url,
-            boards=clean_boards,
+            boards=["*"],
             filter_cfg=flt,
             auth_header=(webhook_auth_header or "").strip() or None,
             principal_handle=clean_handle,

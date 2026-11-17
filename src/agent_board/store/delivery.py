@@ -93,7 +93,7 @@ def insert_subscription(
 def get_subscription_by_id(conn: sqlite3.Connection, sub_id: str) -> sqlite3.Row | None:
     return conn.execute(
         """
-        SELECT s.*, p.handle AS principal_handle
+        SELECT s.*, p.handle AS principal_handle, p.is_server_owner AS is_server_owner
         FROM subscriptions s
         JOIN principals p ON p.id = s.principal_id
         WHERE s.id = ?
@@ -134,6 +134,26 @@ def list_active_subscriptions(conn: sqlite3.Connection) -> list[sqlite3.Row]:
         JOIN principals p ON p.id = s.principal_id
         WHERE s.active = 1 AND p.disabled_at IS NULL
         """
+    ).fetchall()
+
+
+def list_active_subscriptions_for_board(conn: sqlite3.Connection, board_id: str) -> list[sqlite3.Row]:
+    return conn.execute(
+        """
+        SELECT s.*, p.disabled_at AS principal_disabled_at
+        FROM subscriptions s
+        JOIN principals p ON p.id = s.principal_id
+        WHERE s.active = 1
+          AND p.disabled_at IS NULL
+          AND (
+              p.is_server_owner = 1
+              OR EXISTS (
+                  SELECT 1 FROM memberships m
+                  WHERE m.board_id = ? AND m.principal_id = s.principal_id
+              )
+          )
+        """,
+        (board_id,),
     ).fetchall()
 
 

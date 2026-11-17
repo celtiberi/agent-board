@@ -51,17 +51,32 @@ class NudgeWorker:
             kwargs["transport"] = self._transport
         return httpx.AsyncClient(**kwargs)
 
-    async def send_test_nudge(self, *, sub_id: str, board_slug: str = "ops") -> dict[str, Any]:
-        sub = delivery_store.get_subscription_by_id(self.services.db.read_conn(), sub_id)
+    async def send_test_nudge(self, *, sub_id: str, board_slug: str | None = None) -> dict[str, Any]:
+        conn = self.services.db.read_conn()
+        sub = delivery_store.get_subscription_by_id(conn, sub_id)
         if sub is None:
             return {"ok": False, "status_code": None, "error": "Subscription not found"}
+
+        resolved_slug = board_slug
+        if not resolved_slug:
+            sub_boards = [b for b in json.loads(sub["boards"]) if b and b != "*"]
+            if sub_boards:
+                resolved_slug = sub_boards[0]
+            else:
+                member_boards = boards_store.list_boards_for_principal(
+                    conn,
+                    principal_id=sub["principal_id"],
+                    is_server_owner=bool(sub["is_server_owner"]),
+                    include_archived=False,
+                )
+                resolved_slug = str(member_boards[0]["slug"]) if member_boards else "ops"
 
         now = utc_now()
         now_iso = dt_to_iso(now)
         nudge_id = new_ulid()
         payload = {
             "event": "board.activity",
-            "board": board_slug,
+            "board": resolved_slug,
             "latest_seq": 1,
             "unread_for_you": 0,
             "types": ["system"],

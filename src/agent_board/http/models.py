@@ -134,6 +134,21 @@ class CreatePrincipalRequest(BaseModel):
     display_name: str
     is_server_owner: bool = False
     password: str | None = None
+    tags: list[str] | None = None
+
+
+class SetPrincipalTagsRequest(BaseModel):
+    tags: list[str] = Field(default_factory=list)
+
+
+class ShoutRequest(BaseModel):
+    body_md: str
+    tag: str | None = None
+    all_boards: bool = False
+    exclude_boards: list[str] = Field(default_factory=list)
+    thread_title: str = "general"
+    wake: bool = True
+    dry_run: bool = False
 
 
 class CreateTokenRequest(BaseModel):
@@ -155,6 +170,7 @@ class OnboardAgentRequest(BaseModel):
     boards: list[str]
     display_name: str | None = None
     role: str = "agent"
+    tags: list[str] | None = None
     strict_scope: bool = True
     rotate_tokens: bool = True
     webhook_url: str | None = None

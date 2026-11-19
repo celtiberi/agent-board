@@ -20,6 +20,8 @@ from agent_board.http.models import (
     ReopenIssueRequest,
     RevokeDecisionRequest,
     SetMembershipRequest,
+    SetPrincipalTagsRequest,
+    ShoutRequest,
     SupersedeDecisionRequest,
     UpdateIssueRequest,
 )
@@ -27,6 +29,7 @@ from agent_board.services import auth as auth_svc
 from agent_board.services import decisions as decisions_svc
 from agent_board.services import delivery as delivery_svc
 from agent_board.services import issues as issues_svc
+from agent_board.services import messages as messages_svc
 from agent_board.services import onboarding as onboarding_svc
 from agent_board.services.context import AppServices, AuthContext
 from agent_board.store import boards as boards_store
@@ -342,6 +345,36 @@ def admin_create_principal(
         display_name=body.display_name,
         is_server_owner=body.is_server_owner,
         password=body.password,
+        tags=body.tags,
+    )
+
+
+@router.put("/admin/principals/{handle}/tags")
+def admin_set_principal_tags(
+    handle: str,
+    body: SetPrincipalTagsRequest,
+    ctx: AuthContext = Depends(require_api_write),
+    services: AppServices = Depends(get_services),
+) -> dict[str, Any]:
+    return auth_svc.set_principal_tags(services, ctx, handle=handle, tags=body.tags)
+
+
+@router.post("/admin/shout")
+def admin_shout(
+    body: ShoutRequest,
+    ctx: AuthContext = Depends(require_api_write),
+    services: AppServices = Depends(get_services),
+) -> dict[str, Any]:
+    return messages_svc.shout(
+        services,
+        ctx,
+        body_md=body.body_md,
+        tag=body.tag,
+        all_boards=body.all_boards,
+        exclude_boards=body.exclude_boards,
+        thread_title=body.thread_title,
+        wake=body.wake,
+        dry_run=body.dry_run,
     )
 
 
@@ -469,6 +502,7 @@ async def admin_onboard(
         boards=body.boards,
         display_name=body.display_name,
         role=body.role,
+        tags=body.tags,
         strict_scope=body.strict_scope,
         rotate_tokens=body.rotate_tokens,
         webhook_url=body.webhook_url,

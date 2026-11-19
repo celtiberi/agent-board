@@ -31,6 +31,7 @@ from agent_board.ids import (
     is_valid_handle,
     iso_to_dt,
     new_ulid,
+    normalize_principal_tags,
     utc_now,
     utc_now_iso,
 )
@@ -371,6 +372,13 @@ def require_board_role(
     return board, eff
 
 
+def _parse_tags(tags: list[str] | None) -> list[str]:
+    try:
+        return normalize_principal_tags(tags)
+    except ValueError as exc:
+        raise ValidationError(str(exc)) from exc
+
+
 def create_principal(
     services: AppServices,
     ctx: AuthContext,
@@ -380,6 +388,7 @@ def create_principal(
     display_name: str,
     is_server_owner: bool = False,
     password: str | None = None,
+    tags: list[str] | None = None,
 ) -> dict[str, Any]:
     require_server_owner(ctx)
     clean_handle = handle.strip().lower()
@@ -389,6 +398,7 @@ def create_principal(
         raise ValidationError("kind must be 'human' or 'agent'")
     if not display_name.strip():
         raise ValidationError("display_name is required")
+    clean_tags = _parse_tags(tags)
 
     now_iso = utc_now_iso()
     pid = new_ulid()
@@ -403,6 +413,7 @@ def create_principal(
             display_name=display_name.strip(),
             is_server_owner=is_server_owner,
             created_at=now_iso,
+            tags_json=json.dumps(clean_tags),
         )
         if password is not None:
             if kind != "human":
@@ -420,7 +431,7 @@ def create_principal(
             action="principal.create",
             ok=True,
             target=clean_handle,
-            detail={"kind": kind, "is_server_owner": is_server_owner},
+            detail={"kind": kind, "is_server_owner": is_server_owner, "tags": clean_tags},
         )
         row = principals_store.get_principal_by_id(conn, pid)
         return _principal_to_dict(row)
@@ -469,6 +480,37 @@ def set_principal_disabled(services: AppServices, ctx: AuthContext, *, handle: s
             target=clean_handle,
         )
         return _principal_to_dict(principals_store.get_principal_by_id(conn, row["id"]))
+
+
+def set_principal_tags(
+    services: AppServices,
+    ctx: AuthContext,
+    *,
+    handle: str,
+    tags: list[str],
+) -> dict[str, Any]:
+    """Replace the capability/group tags assigned to a principal."""
+    require_server_owner(ctx)
+    clean_handle = handle.strip().lower()
+    if clean_handle == "system":
+        raise ValidationError("Cannot modify system principal")
+    clean_tags = _parse_tags(tags)
+    with services.db.write_tx() as conn:
+        row = principals_store.get_principal_by_handle(conn, clean_handle)
+        if row is None:
+            raise NotFoundError(f"Principal '{clean_handle}' not found")
+        principals_store.update_principal_tags(conn, row["id"], json.dumps(clean_tags))
+        record_audit(
+            conn,
+            ctx=ctx,
+            action="principal.tags",
+            ok=True,
+            target=clean_handle,
+            detail={"tags": clean_tags},
+        )
+        updated = principals_store.get_principal_by_id(conn, row["id"])
+        assert updated is not None
+        return _principal_to_dict(updated)
 
 
 def list_principals(services: AppServices, ctx: AuthContext) -> list[dict[str, Any]]:
@@ -671,12 +713,14 @@ def list_audit_logs(services: AppServices, ctx: AuthContext, *, limit: int = 200
 
 
 def _principal_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    tags_raw = row["tags"] if "tags" in row.keys() and row["tags"] else "[]"
     return {
         "id": row["id"],
         "handle": row["handle"],
         "kind": row["kind"],
         "display_name": row["display_name"],
         "is_server_owner": bool(row["is_server_owner"]),
+        "tags": json.loads(tags_raw),
         "created_at": row["created_at"],
         "disabled_at": row["disabled_at"],
     }

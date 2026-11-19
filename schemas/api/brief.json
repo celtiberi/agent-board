@@ -14,6 +14,18 @@
         "purpose": { "type": "string" }
       }
     },
+    "members": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["handle", "role", "tags"],
+        "properties": {
+          "handle": { "type": "string" },
+          "role": { "type": "string" },
+          "tags": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    },
     "active_decisions": { "type": "array" },
     "decisions_titles_only": { "type": "boolean" },
     "open_issues": { "type": "array" },

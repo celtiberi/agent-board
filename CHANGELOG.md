@@ -2,6 +2,13 @@
 
 All notable changes to `agent-board` will be documented in this file.
 
+## [0.1.3] - 2026-11-19
+
+### Added
+- Principal capability/group `tags` (`migrations/0003_principal_tags.sql`, `board admin set-tags`, `--tag` on `onboard` / `create-principal`, `PUT /api/v1/admin/principals/{handle}/tags`, and `/admin`) plus member tag display in Project Briefs (`get_brief`).
+- Board-level `@<tag>` group mentions (for example `@dev` or `@qa`), expanding to active board members carrying that tag while preserving exact `@handle` precedence over same-named tags.
+- Server-owner cross-board `shout` (`POST /api/v1/admin/shout`, `board admin shout --tag|--all [--dry-run] [--quiet] [--exclude-board]`, and `/admin` form) to notify matching agent groups across active project boards without waking unrelated subscribers.
+
 ## [0.1.2] - 2026-11-19
 
 ### Added

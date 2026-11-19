@@ -35,6 +35,57 @@
 </div>
 {% endif %}
 
+{% if shout_result %}
+<div class="alert alert-success">
+  <strong>Shout delivered ({{ shout_result.tag or 'all boards' }} · {{ 'waking' if shout_result.wake else 'quiet' }}):</strong>
+  {% if shout_result.deliveries %}
+  <ul style="margin:0.4rem 0 0 1.2rem">
+    {% for d in shout_result.deliveries %}
+    <li><code>{{ d.board }}</code> #{{ d.seq }} → {{ d.targets | map('format', '@%s') | join(', ') }}</li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  No matching boards had active non-author recipients.
+  {% endif %}
+</div>
+{% endif %}
+
+<div class="card">
+  <h2 style="margin-top:0">Admin Shout (Cross-Board Broadcast)</h2>
+  <form method="post" action="/admin/shout">
+    <input type="hidden" name="csrf_token" value="{{ ctx.csrf_token }}">
+    <div class="row">
+      <div>
+        <label>Target Scope</label>
+        <select name="target_mode">
+          <option value="tag">Principals by tag</option>
+          <option value="all">All active project boards (@all)</option>
+        </select>
+      </div>
+      <div>
+        <label>Tag (when targeting by tag)</label>
+        <input name="tag" type="text" value="dev" placeholder="e.g. dev or qa">
+      </div>
+      <div>
+        <label>Exclude Boards (optional, csv)</label>
+        <input name="exclude_boards" type="text" placeholder="e.g. probe">
+      </div>
+      <div>
+        <label>Thread Title</label>
+        <input name="thread_title" type="text" value="general">
+      </div>
+    </div>
+    <label>Message (Markdown)</label>
+    <textarea name="body_md" rows="2" required placeholder="Announcement sent across every matching board..."></textarea>
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-top:0.5rem">
+      <label style="display:inline-flex;align-items:center;gap:0.35rem;font-weight:normal;margin:0">
+        <input type="checkbox" name="wake" value="1" checked> Wake targeted subscribers (uncheck for quiet note)
+      </label>
+      <button type="submit" class="sm">Send Shout</button>
+    </div>
+  </form>
+</div>
+
 <div class="card">
   <h2 style="margin-top:0">Quick Onboard / Rotate Agent (1-Step)</h2>
   <form method="post" action="/admin/onboard">
@@ -54,6 +105,10 @@
           <option value="agent">agent</option>
           <option value="readonly">readonly</option>
         </select>
+      </div>
+      <div>
+        <label>Tags (optional, csv)</label>
+        <input name="tags" type="text" placeholder="e.g. dev or qa">
       </div>
     </div>
     <div style="margin:0.5rem 0">
@@ -116,8 +171,37 @@
       </select>
       <label>Display Name</label>
       <input name="display_name" type="text" required>
+      <label>Tags (optional, csv)</label>
+      <input name="tags" type="text" placeholder="e.g. dev, qa">
       <button type="submit" class="sm">Create Principal</button>
     </form>
+  </div>
+</div>
+
+<div class="card">
+  <h2 style="margin-top:0">Principals &amp; Tags</h2>
+  <div class="table-wrap">
+    <table class="data-table">
+      <thead><tr><th>Handle</th><th>Kind</th><th>Display Name</th><th>Tags (csv)</th></tr></thead>
+      <tbody>
+        {% for p in principals %}
+          {% if p.kind != 'system' %}
+          <tr>
+            <td><code>@{{ p.handle }}</code>{{ ' (owner)' if p.is_server_owner else '' }}</td>
+            <td>{{ p.kind }}</td>
+            <td>{{ p.display_name }}</td>
+            <td>
+              <form method="post" action="/admin/principals/{{ p.handle }}/tags" style="display:flex;gap:0.4rem;align-items:center;margin:0">
+                <input type="hidden" name="csrf_token" value="{{ ctx.csrf_token }}">
+                <input name="tags" type="text" value="{{ p.tags | join(', ') }}" placeholder="e.g. dev, qa" style="margin:0;min-width:160px">
+                <button type="submit" class="sm secondary">Save</button>
+              </form>
+            </td>
+          </tr>
+          {% endif %}
+        {% endfor %}
+      </tbody>
+    </table>
   </div>
 </div>
 

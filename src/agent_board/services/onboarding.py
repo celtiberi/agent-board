@@ -67,11 +67,11 @@ def build_remote_onboarding_md(
         note_behavior = (
             "Webhook wakes trigger on unmentioned actionable types, direct `@"
             + handle
-            + "` mentions (including `note`s), and `@all`/`@everyone` broadcasts."
+            + "` mentions (including `note`s), `@<tag>` group mentions, and `@all`/`@everyone` broadcasts."
             if skip_plain_notes
             else "Webhook wakes fire on all unmentioned non-self messages, direct `@"
             + handle
-            + "` mentions, and `@all`/`@everyone` broadcasts."
+            + "` mentions, `@<tag>` group mentions, and `@all`/`@everyone` broadcasts."
         )
         lines.extend(["", f"- **Push Nudge Active:** {note_behavior}"])
     return "\n".join(lines)
@@ -114,7 +114,8 @@ def build_local_profile_onboarding_md(
             (
                 "3. Post updates (`note`, `task`, `question`, `status`, `retest_report`) with an "
                 "`idempotency_key`: `@handle` wakes only the mentioned recipient(s), "
-                "`@all`/`@everyone` wakes everyone on the board, and unmentioned `note`s stay silent."
+                "`@<tag>` wakes active members carrying that tag, `@all`/`@everyone` wakes "
+                "everyone on the board, and unmentioned `note`s stay silent."
             ),
             f"4. Mark messages read when finished: `ack(board='{first_board}', read_seq=<latest_seq>)`.",
         ]
@@ -129,6 +130,7 @@ async def onboard_agent(
     boards: list[str],
     display_name: str | None = None,
     role: str = "agent",
+    tags: list[str] | None = None,
     strict_scope: bool = True,
     rotate_tokens: bool = True,
     webhook_url: str | None = None,
@@ -157,19 +159,28 @@ async def onboard_agent(
 
     existing = principals_store.get_principal_by_handle(rconn, clean_handle)
     if existing is None:
-        auth_svc.create_principal(
+        created_principal = auth_svc.create_principal(
             services,
             ctx,
             handle=clean_handle,
             kind="agent",
             display_name=(display_name or clean_handle).strip(),
+            tags=tags,
         )
+        effective_tags = list(created_principal["tags"])
         is_owner_principal = False
     else:
         if existing["kind"] != "agent":
             raise ValidationError(f"Principal '{clean_handle}' is not an agent")
         if existing["disabled_at"] is not None:
             auth_svc.set_principal_disabled(services, ctx, handle=clean_handle, disabled=False)
+        if tags is not None:
+            updated_principal = auth_svc.set_principal_tags(services, ctx, handle=clean_handle, tags=tags)
+            effective_tags = list(updated_principal["tags"])
+        else:
+            refreshed = principals_store.get_principal_by_handle(services.db.read_conn(), clean_handle)
+            assert refreshed is not None
+            effective_tags = list(auth_svc._principal_to_dict(refreshed)["tags"])
         is_owner_principal = bool(existing["is_server_owner"])
 
     all_board_slugs = [str(r["slug"]) for r in boards_store.list_all_boards(services.db.read_conn())]
@@ -252,6 +263,7 @@ async def onboard_agent(
         "principal_handle": clean_handle,
         "boards": clean_boards,
         "role": role,
+        "tags": effective_tags,
         "revoked_prefixes": revoked_prefixes,
         "env_var_name": env_var_name,
         "token": token_data,

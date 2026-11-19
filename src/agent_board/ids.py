@@ -132,3 +132,22 @@ def is_valid_slug(slug: str) -> bool:
 def is_valid_handle(handle: str) -> bool:
     """Check if a principal handle matches allowed @mention characters."""
     return bool(_HANDLE_RE.match(handle))
+
+
+def normalize_principal_tags(tags: list[str] | None) -> list[str]:
+    """Validate and deduplicate lowercase principal tags (excluding reserved handles)."""
+    if not tags:
+        return []
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for raw in tags:
+        for part in str(raw).split(","):
+            clean = part.strip().lower()
+            if not clean:
+                continue
+            if not is_valid_handle(clean) or clean in RESERVED_HANDLES:
+                raise ValueError(f"Invalid principal tag '{part.strip()}'")
+            if clean not in seen:
+                normalized.append(clean)
+                seen.add(clean)
+    return normalized

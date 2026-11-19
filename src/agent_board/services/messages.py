@@ -10,9 +10,9 @@ from typing import Any
 import jsonschema
 
 from agent_board.errors import ConflictError, NotFoundError, PermissionDeniedError, ValidationError
-from agent_board.ids import BROADCAST_MENTIONS, new_ulid, utc_now_iso
+from agent_board.ids import BROADCAST_MENTIONS, new_ulid, normalize_principal_tags, utc_now_iso
 from agent_board.secrets_scan import scan_for_secrets
-from agent_board.services.auth import record_audit, require_board_role
+from agent_board.services.auth import record_audit, require_board_role, require_server_owner
 from agent_board.services.context import AppServices, AuthContext
 from agent_board.services.delivery import enqueue_outbox_for_message
 from agent_board.services.idempotency import execute_idempotent
@@ -60,38 +60,61 @@ def _extract_mentions(
     *,
     board_id: str,
     author_id: str,
-) -> tuple[list[str], bool]:
-    """Resolve explicit @handle mentions on this board and detect @all/@everyone broadcasts."""
+) -> tuple[list[str], bool, bool]:
+    """Resolve @handle mentions, @<tag> group mentions, and @all/@everyone broadcasts."""
     raw_handles = list(dict.fromkeys(_MENTION_RE.findall(body_md.lower())))
     if not raw_handles:
-        return [], False
+        return [], False, False
 
     is_broadcast = any(h in BROADCAST_MENTIONS for h in raw_handles)
     members = boards_store.list_memberships_for_board(conn, board_id)
     active_members = [m for m in members if m["kind"] != "system" and m["disabled_at"] is None]
     member_ids = {str(m["principal_id"]) for m in active_members}
 
-    direct_handles = [h for h in raw_handles if h not in BROADCAST_MENTIONS]
-    mentioned_ids: list[str] = []
-    if direct_handles:
-        rows = principals_store.get_principals_by_handles(conn, direct_handles)
+    members_by_tag: dict[str, list[str]] = {}
+    for m in active_members:
+        pid = str(m["principal_id"])
+        raw_tags = m["tags"] if "tags" in m.keys() and m["tags"] else "[]"
+        for t in json.loads(raw_tags):
+            members_by_tag.setdefault(str(t).lower(), []).append(pid)
+
+    direct_tokens = [h for h in raw_handles if h not in BROADCAST_MENTIONS]
+    matched_by_handle: dict[str, str] = {}
+    if direct_tokens:
+        rows = principals_store.get_principals_by_handles(conn, direct_tokens)
         for r in rows:
             if (
                 r["kind"] != "system"
                 and r["disabled_at"] is None
                 and (bool(r["is_server_owner"]) or str(r["id"]) in member_ids)
             ):
-                mentioned_ids.append(str(r["id"]))
+                matched_by_handle[str(r["handle"]).lower()] = str(r["id"])
+
+    mentioned_ids: list[str] = []
+    seen = set()
+    is_directed = False
+    for tok in direct_tokens:
+        if tok in matched_by_handle:
+            is_directed = True
+            pid = matched_by_handle[tok]
+            if pid not in seen:
+                mentioned_ids.append(pid)
+                seen.add(pid)
+        elif tok in members_by_tag:
+            is_directed = True
+            for pid in members_by_tag[tok]:
+                if pid != author_id and pid not in seen:
+                    mentioned_ids.append(pid)
+                    seen.add(pid)
 
     if is_broadcast:
-        seen = set(mentioned_ids)
         for m in active_members:
             pid = str(m["principal_id"])
             if pid != author_id and pid not in seen:
                 mentioned_ids.append(pid)
                 seen.add(pid)
 
-    return mentioned_ids, is_broadcast
+    return mentioned_ids, is_broadcast, is_directed
 
 
 def _hydrate_messages(conn: sqlite3.Connection, rows: list[sqlite3.Row]) -> list[dict[str, Any]]:
@@ -203,6 +226,7 @@ def post_message_in_tx(
     data: dict[str, Any] | None = None,
     reply_to_id: str | None = None,
     attachment_ids: list[str] | None = None,
+    suppress_wake: bool = False,
     now_iso: str | None = None,
 ) -> dict[str, Any]:
     if msg_type not in VALID_MESSAGE_TYPES:
@@ -238,7 +262,7 @@ def post_message_in_tx(
                 raise ConflictError(f"Attachment '{att_id}' is already attached to a message")
 
     warnings = scan_for_secrets(body_md)
-    mentioned_ids, is_broadcast = _extract_mentions(
+    mentioned_ids, is_broadcast, is_directed = _extract_mentions(
         conn,
         body_md,
         board_id=board["id"],
@@ -288,17 +312,19 @@ def post_message_in_tx(
         principal_id=ctx.principal_id,
         now_iso=ts,
     )
-    enqueue_outbox_for_message(
-        conn,
-        board_id=board["id"],
-        board_slug=board["slug"],
-        seq=seq,
-        author_id=ctx.principal_id,
-        msg_type=msg_type,
-        mentioned_principal_ids=set(mentioned_ids),
-        is_broadcast=is_broadcast,
-        now_iso=ts,
-    )
+    if not suppress_wake:
+        enqueue_outbox_for_message(
+            conn,
+            board_id=board["id"],
+            board_slug=board["slug"],
+            seq=seq,
+            author_id=ctx.principal_id,
+            msg_type=msg_type,
+            mentioned_principal_ids=set(mentioned_ids),
+            is_broadcast=is_broadcast,
+            is_directed=is_directed,
+            now_iso=ts,
+        )
     row = messages_store.get_message_by_id(conn, msg_id)
     assert row is not None
     return _hydrate_messages(conn, [row])[0]
@@ -418,7 +444,7 @@ def edit_message(
             )
             now_iso = utc_now_iso()
             warnings = scan_for_secrets(body_md)
-            mentioned_ids, is_broadcast = _extract_mentions(
+            mentioned_ids, is_broadcast, is_directed = _extract_mentions(
                 conn,
                 body_md,
                 board_id=board["id"],
@@ -469,6 +495,7 @@ def edit_message(
                 msg_type=target["type"],
                 mentioned_principal_ids=set(mentioned_ids),
                 is_broadcast=is_broadcast,
+                is_directed=is_directed,
                 now_iso=now_iso,
             )
             record_audit(
@@ -636,4 +663,140 @@ def get_message_with_history(
     return {
         "message": requested,
         "versions": hydrated,
+    }
+
+
+def shout(
+    services: AppServices,
+    ctx: AuthContext,
+    *,
+    body_md: str,
+    tag: str | None = None,
+    all_boards: bool = False,
+    exclude_boards: list[str] | None = None,
+    thread_title: str = "general",
+    wake: bool = True,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Server-owner cross-board announcement targeted by principal tag or sent to all active project boards."""
+    require_server_owner(ctx)
+    clean_body = body_md.strip()
+    if not clean_body:
+        raise ValidationError("body_md must not be empty")
+    if bool(tag and tag.strip()) == bool(all_boards):
+        raise ValidationError("Specify exactly one of tag or all_boards=True")
+
+    clean_tag: str | None = None
+    if tag and tag.strip():
+        try:
+            parsed = normalize_principal_tags([tag])
+        except ValueError as exc:
+            raise ValidationError(str(exc)) from exc
+        if not parsed:
+            raise ValidationError("Invalid tag")
+        clean_tag = parsed[0]
+
+    clean_thread = thread_title.strip() or "general"
+    exclude_set = {"ops", *(b.strip().lower() for b in (exclude_boards or []) if b.strip())}
+
+    existing_mentions = set(_MENTION_RE.findall(clean_body.lower()))
+    if not wake:
+        effective_body = clean_body
+        msg_type = "note"
+    elif clean_tag is not None:
+        effective_body = clean_body if clean_tag in existing_mentions else f"@{clean_tag} {clean_body}"
+        msg_type = "status"
+    else:
+        effective_body = clean_body if (existing_mentions & BROADCAST_MENTIONS) else f"@all {clean_body}"
+        msg_type = "status"
+
+    def _collect_targets(conn: sqlite3.Connection, board_row: sqlite3.Row) -> list[str]:
+        members = boards_store.list_memberships_for_board(conn, board_row["id"])
+        active_members = [
+            m
+            for m in members
+            if m["kind"] != "system" and m["disabled_at"] is None and str(m["principal_id"]) != ctx.principal_id
+        ]
+        if clean_tag is not None:
+            return [
+                str(m["handle"])
+                for m in active_members
+                if clean_tag in json.loads(m["tags"] if "tags" in m.keys() and m["tags"] else "[]")
+            ]
+        return [str(m["handle"]) for m in active_members]
+
+    deliveries: list[dict[str, Any]] = []
+    if dry_run:
+        with services.db.read_snapshot() as conn:
+            for b in boards_store.list_all_boards(conn):
+                slug = str(b["slug"])
+                if b["archived_at"] is not None or slug in exclude_set:
+                    continue
+                targets = _collect_targets(conn, b)
+                if not targets:
+                    continue
+                deliveries.append(
+                    {
+                        "board": slug,
+                        "targets": targets,
+                        "would_wake": wake,
+                    }
+                )
+        return {
+            "tag": clean_tag,
+            "all_boards": all_boards,
+            "wake": wake,
+            "dry_run": True,
+            "thread_title": clean_thread,
+            "deliveries": deliveries,
+        }
+
+    with services.db.write_tx() as conn:
+        for b in boards_store.list_all_boards(conn):
+            slug = str(b["slug"])
+            if b["archived_at"] is not None or slug in exclude_set:
+                continue
+            targets = _collect_targets(conn, b)
+            if not targets:
+                continue
+            posted = post_message_in_tx(
+                conn,
+                services=services,
+                ctx=ctx,
+                board=b,
+                msg_type=msg_type,
+                body_md=effective_body,
+                thread_title=clean_thread,
+                suppress_wake=(not wake),
+            )
+            deliveries.append(
+                {
+                    "board": slug,
+                    "seq": posted["seq"],
+                    "message_id": posted["id"],
+                    "targets": targets,
+                    "woke": wake,
+                }
+            )
+        record_audit(
+            conn,
+            ctx=ctx,
+            action="admin.shout",
+            ok=True,
+            target=clean_tag or "all_boards",
+            detail={
+                "tag": clean_tag,
+                "all_boards": all_boards,
+                "wake": wake,
+                "boards": [d["board"] for d in deliveries],
+            },
+        )
+
+    return {
+        "tag": clean_tag,
+        "all_boards": all_boards,
+        "wake": wake,
+        "dry_run": False,
+        "thread_title": clean_thread,
+        "deliveries": deliveries,
     }

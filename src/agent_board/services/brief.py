@@ -8,6 +8,7 @@ from typing import Any
 
 from agent_board.services.auth import require_board_role
 from agent_board.services.context import AppServices, AuthContext
+from agent_board.store import boards as boards_store
 from agent_board.store import decisions as decisions_store
 from agent_board.store import delivery as delivery_store
 from agent_board.store import issues as issues_store
@@ -150,9 +151,21 @@ def _find_open_tasks_and_questions(
     return open_tasks, unanswered_questions
 
 
+def _format_members_line(members: list[dict[str, Any]]) -> str:
+    parts: list[str] = []
+    for m in members:
+        tags = m.get("tags") or []
+        if tags:
+            parts.append(f"@{m['handle']} [{', '.join(tags)}]")
+        else:
+            parts.append(f"@{m['handle']}")
+    return f"**Members:** {', '.join(parts)}"
+
+
 def _render_brief_markdown(
     *,
     board: sqlite3.Row,
+    members: list[dict[str, Any]],
     decisions: list[dict[str, Any]],
     titles_only: bool,
     open_issues: list[dict[str, Any]],
@@ -169,9 +182,10 @@ def _render_brief_markdown(
         f"# Project Brief: {board['name']} (`{board['slug']}`)",
         "",
         board["purpose"],
-        "",
-        f"## Active Decisions ({len(decisions)})",
     ]
+    if members:
+        lines.extend(["", _format_members_line(members)])
+    lines.extend(["", f"## Active Decisions ({len(decisions)})"])
     if not decisions:
         lines.append("_None yet._")
     else:
@@ -343,10 +357,21 @@ def get_brief(services: AppServices, ctx: AuthContext, *, board_slug: str) -> di
             caller_id=ctx.principal_id,
             caller_handle=ctx.handle,
         )
+        member_rows = boards_store.list_memberships_for_board(conn, board_id)
+        members = [
+            {
+                "handle": m["handle"],
+                "role": m["role"],
+                "tags": json.loads(m["tags"] if "tags" in m.keys() and m["tags"] else "[]"),
+            }
+            for m in member_rows
+            if m["kind"] != "system" and m["disabled_at"] is None
+        ]
 
     titles_only = len(active_decisions) > _MAX_FULL_DECISIONS
     markdown = _render_brief_markdown(
         board=board,
+        members=members,
         decisions=active_decisions,
         titles_only=titles_only,
         open_issues=open_issues,
@@ -363,6 +388,7 @@ def get_brief(services: AppServices, ctx: AuthContext, *, board_slug: str) -> di
         titles_only = True
         markdown = _render_brief_markdown(
             board=board,
+            members=members,
             decisions=active_decisions,
             titles_only=True,
             open_issues=open_issues,
@@ -383,6 +409,7 @@ def get_brief(services: AppServices, ctx: AuthContext, *, board_slug: str) -> di
             "name": board["name"],
             "purpose": board["purpose"],
         },
+        "members": members,
         "active_decisions": active_decisions,
         "decisions_titles_only": titles_only,
         "open_issues": open_issues,

@@ -91,6 +91,7 @@ def subscription_matches_message(
     msg_type: str,
     mentioned_principal_ids: set[str],
     is_broadcast: bool = False,
+    is_directed: bool = False,
 ) -> bool:
     sub_boards: list[str] = json.loads(sub_row["boards"])
     if "*" not in sub_boards and board_slug not in sub_boards:
@@ -105,7 +106,7 @@ def subscription_matches_message(
         return True
 
     is_mentioned = sub_row["principal_id"] in mentioned_principal_ids
-    if mentioned_principal_ids:
+    if mentioned_principal_ids or is_directed:
         return is_mentioned
 
     mentions_only = bool(flt.get("mentions_only", False))
@@ -130,6 +131,7 @@ def enqueue_outbox_for_message(
     msg_type: str,
     mentioned_principal_ids: set[str],
     is_broadcast: bool = False,
+    is_directed: bool = False,
     now_iso: str,
 ) -> None:
     """Enqueue or coalesce outbox nudges inside the caller's write transaction."""
@@ -143,6 +145,7 @@ def enqueue_outbox_for_message(
             msg_type=msg_type,
             mentioned_principal_ids=mentioned_principal_ids,
             is_broadcast=is_broadcast,
+            is_directed=is_directed,
         ):
             continue
         debounce_dt = now_dt + timedelta(seconds=int(sub["debounce_s"]))

@@ -305,15 +305,61 @@ def admin_create_principal(
     name: str = typer.Option(..., "--name"),
     kind: str = typer.Option("agent", "--kind"),
     owner: bool = typer.Option(False, "--owner/--no-owner"),
+    tag: list[str] = typer.Option([], "--tag", "-T", help="Capability/group tag(s) (e.g. dev, qa)."),
 ) -> None:
     """Create a principal."""
+    payload: dict[str, Any] = {"handle": handle, "kind": kind, "display_name": name, "is_server_owner": owner}
+    if tag:
+        payload["tags"] = [s.strip() for raw in tag for s in raw.split(",") if s.strip()]
     with _client() as c:
-        data = _check_resp(
-            c.post(
-                "/admin/principals",
-                json={"handle": handle, "kind": kind, "display_name": name, "is_server_owner": owner},
-            )
-        )
+        data = _check_resp(c.post("/admin/principals", json=payload))
+    typer.echo(json.dumps(data, indent=2))
+
+
+@admin_cli.command("set-tags")
+def admin_set_tags(
+    handle: str = typer.Argument(...),
+    tags: list[str] = typer.Argument(None, help="Capability tags (e.g. dev qa)."),
+    clear: bool = typer.Option(False, "--clear", help="Remove all tags from the principal."),
+) -> None:
+    """Set or clear capability/group tags on a principal."""
+    if clear and tags:
+        typer.echo("Error: pass either tag names or --clear, not both.", err=True)
+        raise typer.Exit(1)
+    if not clear and not tags:
+        typer.echo("Error: pass one or more tags or --clear.", err=True)
+        raise typer.Exit(1)
+    clean_tags = [] if clear else [s.strip() for raw in tags for s in raw.split(",") if s.strip()]
+    with _client() as c:
+        data = _check_resp(c.put(f"/admin/principals/{handle}/tags", json={"tags": clean_tags}))
+    typer.echo(json.dumps(data, indent=2))
+
+
+@admin_cli.command("shout")
+def admin_shout(
+    message: str = typer.Option(..., "--message", "-m", help="Markdown announcement to post across matching boards."),
+    tag: str | None = typer.Option(None, "--tag", "-T", help="Target active members with this tag (e.g. dev)."),
+    all_boards: bool = typer.Option(False, "--all", help="Target all active project boards."),
+    exclude_board: list[str] = typer.Option([], "--exclude-board", help="Board slug(s) to skip."),
+    thread: str = typer.Option("general", "--thread", help="Thread title on each target board."),
+    wake: bool = typer.Option(True, "--wake/--quiet", help="Send actionable wake vs. silent note."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Preview matching boards and handles without posting."),
+) -> None:
+    """Broadcast a server-owner announcement across project boards filtered by tag or to all boards."""
+    if bool(tag and tag.strip()) == bool(all_boards):
+        typer.echo("Error: specify either --tag or --all.", err=True)
+        raise typer.Exit(1)
+    payload: dict[str, Any] = {
+        "body_md": message,
+        "tag": tag.strip() if tag else None,
+        "all_boards": all_boards,
+        "exclude_boards": [s.strip() for raw in exclude_board for s in raw.split(",") if s.strip()],
+        "thread_title": thread,
+        "wake": wake,
+        "dry_run": dry_run,
+    }
+    with _client() as c:
+        data = _check_resp(c.post("/admin/shout", json=payload))
     typer.echo(json.dumps(data, indent=2))
 
 
@@ -585,6 +631,7 @@ def admin_onboard(
     target: str = typer.Option("remote", "--target", "-t", help="Target runtime: remote, antigravity, or local."),
     name: str | None = typer.Option(None, "--name", help="Display name if creating principal."),
     role: str = typer.Option("agent", "--role", help="Role: agent, readonly, or owner."),
+    tag: list[str] = typer.Option([], "--tag", "-T", help="Capability/group tag(s) (e.g. dev, qa)."),
     conversation: str | None = typer.Option(
         None,
         "--conversation",
@@ -620,6 +667,8 @@ def admin_onboard(
     }
     if name is not None:
         payload["display_name"] = name
+    if tag:
+        payload["tags"] = [s.strip() for raw in tag for s in raw.split(",") if s.strip()]
     if webhook_url is not None:
         payload["webhook_url"] = webhook_url
     if webhook_auth is not None:

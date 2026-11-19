@@ -373,3 +373,40 @@ async def test_reserved_broadcast_handles_rejected_on_creation_and_onboarding(en
             create_principal(env.services, env.owner_ctx, handle=reserved, kind="agent", display_name="Reserved")
         with pytest.raises(ValidationError, match="Invalid handle"):
             await onboard_agent(env.services, env.owner_ctx, handle=reserved, boards=["alpha"])
+
+
+async def test_principal_tags_creation_update_validation_and_onboarding(env: BoardTestEnv) -> None:
+    from agent_board.services.auth import set_principal_tags
+    from agent_board.services.onboarding import onboard_agent
+
+    created = create_principal(
+        env.services,
+        env.owner_ctx,
+        handle="tag-dev",
+        kind="agent",
+        display_name="Tagged Dev",
+        tags=["Dev", "backend", "dev"],
+    )
+    assert created["tags"] == ["dev", "backend"]
+
+    updated = set_principal_tags(env.services, env.owner_ctx, handle="tag-dev", tags=["qa", "smoke"])
+    assert updated["tags"] == ["qa", "smoke"]
+
+    cleared = set_principal_tags(env.services, env.owner_ctx, handle="tag-dev", tags=[])
+    assert cleared["tags"] == []
+
+    for bad_tag in ("all", "everyone", "system", "Bad Tag!"):
+        with pytest.raises(ValidationError, match="Invalid principal tag"):
+            set_principal_tags(env.services, env.owner_ctx, handle="tag-dev", tags=[bad_tag])
+
+    # Non-owner cannot modify tags
+    with pytest.raises(PermissionDeniedError):
+        set_principal_tags(env.services, env.bob_ctx, handle="tag-dev", tags=["dev"])
+
+    # Onboarding sets tags on new agents and preserves them when re-onboarded without tags=
+    res1 = await onboard_agent(env.services, env.owner_ctx, handle="new-dev", boards=["alpha"], tags=["dev"])
+    assert res1["tags"] == ["dev"]
+    res2 = await onboard_agent(env.services, env.owner_ctx, handle="new-dev", boards=["alpha"])
+    assert res2["tags"] == ["dev"]
+    res3 = await onboard_agent(env.services, env.owner_ctx, handle="new-dev", boards=["alpha"], tags=["ops-helper"])
+    assert res3["tags"] == ["ops-helper"]

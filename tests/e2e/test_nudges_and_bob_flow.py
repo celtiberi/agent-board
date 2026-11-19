@@ -10,6 +10,7 @@ from typing import Any
 import httpx
 import httpx2
 import jsonschema
+import pytest
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 
@@ -714,3 +715,165 @@ async def test_targeted_mention_broadcast_and_non_member_wake_routing(env: Board
     assert len(res_outsider["alice"]) == 1 and res_outsider["alice"][0]["mentioned"] is False
     assert res_outsider["observer"] == []
     assert res_outsider["outsider"] == []
+
+
+async def test_group_tag_mentions_handle_precedence_and_admin_shout(env: BoardTestEnv) -> None:
+    from agent_board.errors import PermissionDeniedError
+    from agent_board.services.auth import authenticate_bearer, create_principal, create_token, set_principal_tags
+
+    create_principal(env.services, env.owner_ctx, handle="alice", kind="agent", display_name="Alice", tags=["dev"])
+    create_principal(env.services, env.owner_ctx, handle="outsider", kind="agent", display_name="Outsider", tags=["qa"])
+    # Give bob tag "alice" as well as "qa" to test exact @handle precedence over tag expansion.
+    set_principal_tags(env.services, env.owner_ctx, handle="bob", tags=["qa", "alice"])
+    set_principal_tags(env.services, env.owner_ctx, handle="mac-dev-ai", tags=["dev"])
+
+    set_membership(env.services, env.owner_ctx, board_slug="alpha", principal_handle="alice", role="agent")
+
+    boards_svc.create_board(env.services, env.owner_ctx, slug="beta", name="Beta", purpose="Beta dev board")
+    set_membership(env.services, env.owner_ctx, board_slug="beta", principal_handle="alice", role="agent")
+    set_membership(env.services, env.owner_ctx, board_slug="beta", principal_handle="outsider", role="agent")
+
+    boards_svc.create_board(env.services, env.owner_ctx, slug="qa-only", name="QA Only", purpose="Only QA members")
+    set_membership(env.services, env.owner_ctx, board_slug="qa-only", principal_handle="outsider", role="agent")
+
+    boards_svc.create_board(env.services, env.owner_ctx, slug="gamma", name="Gamma", purpose="Archived board")
+    set_membership(env.services, env.owner_ctx, board_slug="gamma", principal_handle="alice", role="agent")
+    boards_svc.update_board(env.services, env.owner_ctx, board_slug="gamma", archived=True)
+
+    alice_ctx = authenticate_bearer(
+        env.services,
+        create_token(
+            env.services, env.owner_ctx, principal_handle="alice", name="alice-tok", board_scope=["*"], max_role="agent"
+        )["token"],
+    )
+    outsider_ctx = authenticate_bearer(
+        env.services,
+        create_token(
+            env.services,
+            env.owner_ctx,
+            principal_handle="outsider",
+            name="outsider-tok",
+            board_scope=["*"],
+            max_role="agent",
+        )["token"],
+    )
+
+    received: dict[str, list[dict[str, Any]]] = {"bob": [], "alice": [], "mac-dev-ai": [], "outsider": []}
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        jsonschema.validate(body, _NUDGE_SCHEMA)
+        received[body["principal"]].append(body)
+        return httpx.Response(200, json={"ok": True})
+
+    for ctx_item in (env.bob_ctx, alice_ctx, env.dev_ctx, outsider_ctx):
+        delivery_svc.create_subscription(
+            env.services,
+            ctx_item,
+            url=f"https://hooks.example/{ctx_item.handle}",
+            boards=["*"],
+            filter_cfg={
+                "types": ["task", "question", "decision", "issue", "retest_report", "status"],
+                "mentions_only": False,
+                "exclude_self": True,
+            },
+            min_interval_s=0,
+            debounce_s=0,
+        )
+
+    worker = NudgeWorker(env.services, transport=httpx.MockTransport(_handler))
+
+    async def _drain() -> dict[str, list[dict[str, Any]]]:
+        await worker.process_due_once(now=utc_now() + timedelta(seconds=5))
+        snap = {k: list(v) for k, v in received.items()}
+        for lst in received.values():
+            lst.clear()
+        return snap
+
+    # 1. @dev wakes both alice and mac-dev-ai (even on a note), NOT bob (qa).
+    m_dev = messages_svc.post_message(
+        env.services, env.owner_ctx, board_slug="alpha", msg_type="note", body_md="Heads up @dev please rebase"
+    )
+    assert set(m_dev["mentions"]) == {"alice", "mac-dev-ai"}
+    res_dev = await _drain()
+    assert len(res_dev["alice"]) == 1 and res_dev["alice"][0]["mentioned"] is True
+    assert len(res_dev["mac-dev-ai"]) == 1 and res_dev["mac-dev-ai"][0]["mentioned"] is True
+    assert res_dev["bob"] == []
+    for ctx_item in (alice_ctx, env.dev_ctx):
+        delivery_svc.ack_cursor(env.services, ctx_item, board_slug="alpha", read_seq=m_dev["seq"])
+
+    # 2. Exact @handle wins over a matching tag name: @alice wakes ONLY alice, not bob (who has tag 'alice').
+    m_prec = messages_svc.post_message(
+        env.services, env.owner_ctx, board_slug="alpha", msg_type="note", body_md="@alice quick question"
+    )
+    assert m_prec["mentions"] == ["alice"]
+    res_prec = await _drain()
+    assert len(res_prec["alice"]) == 1
+    assert res_prec["bob"] == []
+    delivery_svc.ack_cursor(env.services, alice_ctx, board_slug="alpha", read_seq=m_prec["seq"])
+
+    # 3. Sole holder of a tag mentioning their own tag does NOT fall through and wake qa on status.
+    set_principal_tags(env.services, env.owner_ctx, handle="alice", tags=["dev", "solo"])
+    m_solo = messages_svc.post_message(
+        env.services, alice_ctx, board_slug="alpha", msg_type="status", body_md="Note to @solo self"
+    )
+    assert m_solo["mentions"] == []
+    res_solo = await _drain()
+    assert all(len(v) == 0 for v in res_solo.values())
+
+    # 4. Non-owner cannot run shout.
+    with pytest.raises(PermissionDeniedError):
+        messages_svc.shout(env.services, env.bob_ctx, tag="dev", body_md="Nope")
+
+    # 5. dry_run previews exact active matching boards/targets without posting or waking.
+    dry = messages_svc.shout(env.services, env.owner_ctx, tag="dev", body_md="Dry run notice", dry_run=True)
+    assert dry["dry_run"] is True
+    assert [(d["board"], d["targets"]) for d in dry["deliveries"]] == [
+        ("alpha", ["alice", "mac-dev-ai"]),
+        ("beta", ["alice"]),
+    ]
+    assert await _drain() == {"bob": [], "alice": [], "mac-dev-ai": [], "outsider": []}
+
+    # 6. shout --tag dev posts to alpha & beta only (skipping qa-only, ops, archived gamma) and wakes ONLY devs.
+    shout_res = messages_svc.shout(
+        env.services,
+        env.owner_ctx,
+        tag="dev",
+        body_md="Tooling upgraded to v0.7.0",
+        thread_title="releases",
+    )
+    assert [(d["board"], d["targets"]) for d in shout_res["deliveries"]] == [
+        ("alpha", ["alice", "mac-dev-ai"]),
+        ("beta", ["alice"]),
+    ]
+    res_shout = await _drain()
+    assert [n["board"] for n in res_shout["alice"]] == ["alpha", "beta"]
+    assert [n["board"] for n in res_shout["mac-dev-ai"]] == ["alpha"]
+    assert res_shout["bob"] == []
+    assert res_shout["outsider"] == []
+    for d in shout_res["deliveries"]:
+        if d["board"] == "alpha":
+            delivery_svc.ack_cursor(env.services, alice_ctx, board_slug="alpha", read_seq=d["seq"])
+            delivery_svc.ack_cursor(env.services, env.dev_ctx, board_slug="alpha", read_seq=d["seq"])
+        if d["board"] == "beta":
+            delivery_svc.ack_cursor(env.services, alice_ctx, board_slug="beta", read_seq=d["seq"])
+
+    # 7. wake=False (--quiet) posts silent note with zero nudges even if body mentions @dev.
+    quiet_res = messages_svc.shout(
+        env.services,
+        env.owner_ctx,
+        tag="dev",
+        body_md="Quiet FYI @dev",
+        wake=False,
+        exclude_boards=["beta"],
+    )
+    assert [d["board"] for d in quiet_res["deliveries"]] == ["alpha"]
+    assert quiet_res["deliveries"][0]["woke"] is False
+    assert await _drain() == {"bob": [], "alice": [], "mac-dev-ai": [], "outsider": []}
+
+    # 8. all_boards=True shouts to all active non-ops boards (alpha, beta, qa-only) and wakes everyone on them.
+    all_res = messages_svc.shout(env.services, env.owner_ctx, all_boards=True, body_md="Maintenance window tonight")
+    assert [d["board"] for d in all_res["deliveries"]] == ["alpha", "beta", "qa-only"]
+    res_all_boards = await _drain()
+    assert [n["board"] for n in res_all_boards["bob"]] == ["alpha"]
+    assert sorted(n["board"] for n in res_all_boards["outsider"]) == ["beta", "qa-only"]

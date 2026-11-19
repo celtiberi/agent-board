@@ -613,6 +613,7 @@ def create_web_router() -> APIRouter:
             new_token=flash.get("new_token"),
             new_sub_secret=flash.get("new_sub_secret"),
             onboard_result=flash.get("onboard_result"),
+            shout_result=flash.get("shout_result"),
         )
 
     @router.post("/admin/boards")
@@ -637,13 +638,70 @@ def create_web_router() -> APIRouter:
         handle: str = Form(...),
         kind: str = Form(...),
         display_name: str = Form(...),
+        tags: str = Form(default=""),
     ) -> RedirectResponse:
         ctx = _session_ctx(request)
         if ctx is None:
             return _redirect("/login")
         _require_csrf(ctx, csrf_token)
-        auth_svc.create_principal(_services(request), ctx, handle=handle, kind=kind, display_name=display_name)
+        parsed_tags = [t.strip() for t in tags.split(",") if t.strip()]
+        auth_svc.create_principal(
+            _services(request),
+            ctx,
+            handle=handle,
+            kind=kind,
+            display_name=display_name,
+            tags=parsed_tags,
+        )
         return _redirect("/admin?ok=Principal+created")
+
+    @router.post("/admin/principals/{handle}/tags")
+    def web_admin_set_principal_tags(
+        request: Request,
+        handle: str,
+        csrf_token: str = Form(...),
+        tags: str = Form(default=""),
+    ) -> RedirectResponse:
+        ctx = _session_ctx(request)
+        if ctx is None:
+            return _redirect("/login")
+        _require_csrf(ctx, csrf_token)
+        parsed_tags = [t.strip() for t in tags.split(",") if t.strip()]
+        auth_svc.set_principal_tags(_services(request), ctx, handle=handle, tags=parsed_tags)
+        return _redirect("/admin?ok=Principal+tags+updated")
+
+    @router.post("/admin/shout")
+    def web_admin_shout(
+        request: Request,
+        csrf_token: str = Form(...),
+        target_mode: str = Form(default="tag"),
+        tag: str = Form(default=""),
+        exclude_boards: str = Form(default=""),
+        thread_title: str = Form(default="general"),
+        wake: str = Form(default=""),
+        body_md: str = Form(...),
+    ) -> RedirectResponse:
+        ctx = _session_ctx(request)
+        if ctx is None:
+            return _redirect("/login")
+        _require_csrf(ctx, csrf_token)
+        use_all = target_mode == "all"
+        clean_tag = None if use_all else tag.strip()
+        if not use_all and not clean_tag:
+            return _redirect("/admin?err=Provide+a+tag+or+select+All+active+boards")
+        excluded = [b.strip() for b in exclude_boards.split(",") if b.strip()]
+        res = messages_svc.shout(
+            _services(request),
+            ctx,
+            body_md=body_md,
+            tag=clean_tag,
+            all_boards=use_all,
+            exclude_boards=excluded,
+            thread_title=thread_title.strip() or "general",
+            wake=bool(wake),
+        )
+        _ONE_TIME_FLASH[ctx.csrf_token or ""] = {"shout_result": res}
+        return _redirect("/admin?ok=Shout+delivered")
 
     @router.post("/admin/tokens")
     def web_admin_create_token(
@@ -708,6 +766,7 @@ def create_web_router() -> APIRouter:
         display_name: str = Form(default=""),
         boards: list[str] = Form(default=[]),
         role: str = Form(default="agent"),
+        tags: str = Form(default=""),
         webhook_url: str = Form(default=""),
         webhook_auth_header: str = Form(default=""),
         skip_plain_notes: str = Form(default=""),
@@ -727,6 +786,7 @@ def create_web_router() -> APIRouter:
             boards=clean_boards,
             display_name=display_name.strip() or None,
             role=role,
+            tags=[t.strip() for t in tags.split(",") if t.strip()] if tags.strip() else None,
             strict_scope=bool(rotate_tokens),
             rotate_tokens=bool(rotate_tokens),
             webhook_url=webhook_url.strip() or None,

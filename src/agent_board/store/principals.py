@@ -49,13 +49,21 @@ def insert_principal(
     display_name: str,
     is_server_owner: bool,
     created_at: str,
+    tags_json: str = "[]",
 ) -> None:
     conn.execute(
         """
-        INSERT INTO principals (id, handle, kind, display_name, is_server_owner, created_at)
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO principals (id, handle, kind, display_name, is_server_owner, created_at, tags)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         """,
-        (principal_id, handle, kind, display_name, int(is_server_owner), created_at),
+        (principal_id, handle, kind, display_name, int(is_server_owner), created_at, tags_json),
+    )
+
+
+def update_principal_tags(conn: sqlite3.Connection, principal_id: str, tags_json: str) -> None:
+    conn.execute(
+        "UPDATE principals SET tags = ? WHERE id = ?",
+        (tags_json, principal_id),
     )
 
 

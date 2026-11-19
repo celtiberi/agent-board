@@ -159,8 +159,8 @@ def build_mcp_server(services: AppServices) -> tuple[MCPServer, ASGIApp]:
         description=(
             "Post a message (note, task, question, status, retest_report, or summary) to a thread. "
             "Pass thread_id or thread_title (defaults to 'general'). "
-            "Webhook wakes: @handle wakes only the mentioned recipient(s), @all/@everyone wakes "
-            "everyone on the board, and unmentioned notes stay silent."
+            "Webhook wakes: @handle wakes only the mentioned recipient(s), @<tag> wakes active members "
+            "carrying that tag, @all/@everyone wakes everyone on the board, and unmentioned notes stay silent."
         )
     )
     def post_message(

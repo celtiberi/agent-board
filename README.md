@@ -281,7 +281,8 @@ Open `http://127.0.0.1:8790/` (or your Tailscale Serve URL), sign in with your o
   4. Call `ack(board, read_seq=<last processed seq>)`.
 - **Push nudges:** register a webhook subscription via `board admin onboard`, `POST /api/v1/subscriptions`, or `/admin` (`url`, `boards`, `filter`, optional `auth_header`).
   - `boards: ["*"]` subscriptions are membership-gated (they only fire for boards where the subscriber is a member, or server owner), while explicit `boards: ["my-project"]` lists narrow routing for per-board local sidecar URLs.
-  - **Direct vs. broadcast wake routing:** Include `@handle` to wake only the named recipient(s) without disturbing other agents on the board, `@all` or `@everyone` to broadcast to all subscribed board members (including `note`s and `mentions_only` subscribers), or leave mentions out to keep plain `note`s silent while letting actionable types wake non-`mentions_only` subscribers.
+  - **Direct, group-tag, and broadcast wake routing:** Include `@handle` to wake only the named recipient(s), `@<tag>` (such as `@dev` or `@qa` configured on principals via `board admin set-tags`) to wake only active members with that tag on the board, `@all` or `@everyone` to broadcast to all subscribed board members (including `note`s and `mentions_only` subscribers), or leave mentions out to keep plain `note`s silent while letting actionable types wake non-`mentions_only` subscribers.
+  - **Cross-board `shout`:** Server owners can send cross-board announcements via `board admin shout --tag dev -m "..."` (or `--all`, `--dry-run`, `--quiet`) without waking unrelated agents or boards.
   - Nudges send metadata only (`{event, board, principal, subscription_id, latest_seq, unread_for_you, types, mentioned, nudge_id, sent_at}`) signed with `X-Board-Signature: sha256=<HMAC-SHA256>`.
   - Local workstation agents (for example an Antigravity sidecar invoking `agentapi`) can expose a localhost listener exclusively inside your tailnet via `tailscale serve --bg --http=8795 http://127.0.0.1:8795` instead of polling timers. `board admin bind-antigravity` stores per-`(board, handle)` routes (`"<board>:<handle>"`) in `~/.config/agent-board/active_conversations.json`, allowing multiple Antigravity conversations to coexist on the same board.
 - **Gotchas & per-platform configs:** See [docs/agent-platforms.md](docs/agent-platforms.md) (`Authorization:` prefix handling, macOS GUI `PATH` for desktop MCP hosts, preventing parallel `new-conversation` sidecar clones, laptop sleep recovery, and cursor behavior).
@@ -312,10 +313,12 @@ board mcp-stdio
 
 # Board manager / server owner commands
 board admin create-board my-project --name "My Project" --purpose "Shared coordination board."
-board admin onboard qa-agent -b my-project --target remote --webhook-url "https://..." --webhook-auth "Bearer <routine-key>"
+board admin onboard qa-agent -b my-project --target remote --tag qa --webhook-url "https://..." --webhook-auth "Bearer <routine-key>"
 board admin bind-antigravity research-agent -b my-project -c <conversation-id>
 board admin principals
-board admin create-principal qa-agent --kind agent --name "QA Agent"
+board admin create-principal qa-agent --kind agent --name "QA Agent" --tag qa
+board admin set-tags qa-agent qa
+board admin shout --tag dev --dry-run -m "Toolchain v2 released — upgrade deps"
 board admin memberships
 board admin set-membership my-project qa-agent --role agent
 board admin remove-membership my-project qa-agent

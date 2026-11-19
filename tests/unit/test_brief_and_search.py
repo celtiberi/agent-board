@@ -201,3 +201,26 @@ def test_attachments_dedup_allowlist_and_orphan_gc(env: BoardTestEnv) -> None:
     meta, path = att_svc.get_attachment_for_download(env.services, env.ro_ctx, attachment_id=a1["id"])
     assert meta["filename"] == "retest.log"
     assert path.exists()
+
+
+def test_brief_lists_members_and_tags(env: BoardTestEnv) -> None:
+    import json
+    from pathlib import Path
+
+    import jsonschema
+
+    from agent_board.services.auth import set_principal_tags
+
+    set_principal_tags(env.services, env.owner_ctx, handle="bob", tags=["qa"])
+    set_principal_tags(env.services, env.owner_ctx, handle="mac-dev-ai", tags=["dev", "infra"])
+
+    brief = brief_svc.get_brief(env.services, env.bob_ctx, board_slug="alpha")
+    schema = json.loads((Path(__file__).resolve().parents[2] / "schemas" / "api" / "brief.json").read_text())
+    jsonschema.validate(brief, schema)
+
+    by_handle = {m["handle"]: m for m in brief["members"]}
+    assert by_handle["bob"]["tags"] == ["qa"]
+    assert by_handle["mac-dev-ai"]["tags"] == ["dev", "infra"]
+    assert "**Members:**" in brief["markdown"]
+    assert "@bob [qa]" in brief["markdown"]
+    assert "@mac-dev-ai [dev, infra]" in brief["markdown"]

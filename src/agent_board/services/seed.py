@@ -141,6 +141,7 @@ def seed_from_spec(services: AppServices, spec: dict[str, Any]) -> dict[str, Any
                 kind=str(p.get("kind", "agent")),
                 display_name=str(p.get("display_name") or handle),
                 is_server_owner=False,
+                tags=p.get("tags"),
             )
         if handle not in seeded_principals:
             seeded_principals.append(handle)

@@ -520,13 +520,14 @@ def bind_antigravity_conversation(
     *,
     client: httpx.Client,
     handle: str,
-    board_slug: str,
     conversation_id: str,
+    board_slug: str = "*",
+    mentions_only: bool = False,
     webhook_url_override: str | None = None,
 ) -> dict[str, Any]:
-    """Bind one board slug to one Antigravity conversation ID and configure push subscription."""
+    """Bind an Antigravity conversation ID to wildcard '*' or a specific board and configure push webhooks."""
     clean_handle = handle.strip().lower()
-    clean_board = board_slug.strip().lower()
+    clean_board = board_slug.strip().lower() or "*"
     clean_conv = conversation_id.strip()
     if not clean_conv:
         typer.echo("Error: conversation ID is required", err=True)
@@ -546,10 +547,49 @@ def bind_antigravity_conversation(
         typer.echo(f"Missing webhook_url in {hook_path} and --webhook-url was not provided.", err=True)
         raise typer.Exit(1)
 
+    active_path = cfg_dir / "active_conversations.json"
+    cfg_dir.mkdir(parents=True, exist_ok=True)
+    mapping: dict[str, Any] = {}
+    if active_path.exists():
+        mapping = json.loads(active_path.read_text(encoding="utf-8"))
+
+    sub_to_conv: dict[str, str] = {}
+    for raw_key, entry in mapping.items():
+        if not isinstance(entry, dict):
+            continue
+        key_handle = raw_key.split(":", 1)[1].strip().lower() if ":" in raw_key else "admin"
+        resolved_handle = str(entry.get("handle", "")).strip().lower() or key_handle
+        sub_id = str(entry.get("subscription_id", "")).strip()
+        cid = str(entry.get("conversation_id", "")).strip()
+        if resolved_handle == clean_handle and sub_id and cid:
+            sub_to_conv[sub_id] = cid
+
     subs_data = _check_resp(client.get("/subscriptions", params={"all": "true"}))
+    deleted_sub_ids: set[str] = set()
     for s in subs_data.get("subscriptions", []):
-        if s.get("principal_handle") == clean_handle and clean_board in s.get("boards", []):
-            _check_resp(client.delete(f"/subscriptions/{s['id']}"))
+        if s.get("principal_handle") != clean_handle:
+            continue
+        s_boards = [str(b).strip().lower() for b in (s.get("boards") or [])]
+        s_flt = s.get("filter") if isinstance(s.get("filter"), dict) else {}
+        s_mentions_only = bool(s_flt.get("mentions_only", False))
+        sid = str(s.get("id", ""))
+        should_delete = (
+            ("*" in s_boards or (
+                str(s.get("url", "")).strip() == target_url
+                and s_mentions_only == mentions_only
+                and sub_to_conv.get(sid) == clean_conv
+            ))
+            if clean_board == "*"
+            else clean_board in s_boards
+        )
+        if should_delete:
+            _check_resp(client.delete(f"/subscriptions/{sid}"))
+            if sid:
+                deleted_sub_ids.add(sid)
+
+    sub_filter: dict[str, Any] = {"exclude_self": True, "mentions_only": mentions_only}
+    if not mentions_only:
+        sub_filter["types"] = ["task", "question", "issue", "decision", "retest_report", "status"]
 
     sub_data = _check_resp(
         client.post(
@@ -558,11 +598,7 @@ def bind_antigravity_conversation(
                 "principal_handle": clean_handle,
                 "url": target_url,
                 "boards": [clean_board],
-                "filter": {
-                    "exclude_self": True,
-                    "mentions_only": False,
-                    "types": ["task", "question", "issue", "decision", "retest_report", "status"],
-                },
+                "filter": sub_filter,
                 "auth_header": f"Bearer {bearer_token}",
                 "hmac_secret": hmac_secret,
                 "min_interval_s": 30,
@@ -572,36 +608,39 @@ def bind_antigravity_conversation(
     )
     test_res = _check_resp(client.post(f"/subscriptions/{sub_data['id']}/test"))
 
-    active_path = cfg_dir / "active_conversations.json"
-    cfg_dir.mkdir(parents=True, exist_ok=True)
-    mapping: dict[str, Any] = {}
-    if active_path.exists():
-        mapping = json.loads(active_path.read_text(encoding="utf-8"))
-
-    legacy_entry = mapping.pop(clean_board, None)
-    if isinstance(legacy_entry, dict):
-        legacy_handle = str(legacy_entry.get("handle", "")).strip().lower() or "admin"
-        legacy_cid = str(legacy_entry.get("conversation_id", "")).strip()
-        if legacy_handle != clean_handle and legacy_cid:
+    if clean_board == "*":
+        stale_keys = [
+            k
+            for k, entry in mapping.items()
+            if isinstance(entry, dict) and str(entry.get("subscription_id", "")).strip() in deleted_sub_ids
+        ]
+        for k in stale_keys:
+            mapping.pop(k, None)
+    else:
+        legacy_entry = mapping.pop(clean_board, None)
+        if isinstance(legacy_entry, dict):
+            legacy_handle = str(legacy_entry.get("handle", "")).strip().lower() or "admin"
+            legacy_cid = str(legacy_entry.get("conversation_id", "")).strip()
+            if legacy_handle != clean_handle and legacy_cid:
+                mapping.setdefault(
+                    f"{clean_board}:{legacy_handle}",
+                    {
+                        "board": clean_board,
+                        "handle": legacy_handle,
+                        "conversation_id": legacy_cid,
+                        "subscription_id": str(legacy_entry.get("subscription_id", "")).strip(),
+                    },
+                )
+        elif isinstance(legacy_entry, str) and legacy_entry.strip() and clean_handle != "admin":
             mapping.setdefault(
-                f"{clean_board}:{legacy_handle}",
+                f"{clean_board}:admin",
                 {
                     "board": clean_board,
-                    "handle": legacy_handle,
-                    "conversation_id": legacy_cid,
-                    "subscription_id": str(legacy_entry.get("subscription_id", "")).strip(),
+                    "handle": "admin",
+                    "conversation_id": legacy_entry.strip(),
+                    "subscription_id": "",
                 },
             )
-    elif isinstance(legacy_entry, str) and legacy_entry.strip() and clean_handle != "admin":
-        mapping.setdefault(
-            f"{clean_board}:admin",
-            {
-                "board": clean_board,
-                "handle": "admin",
-                "conversation_id": legacy_entry.strip(),
-                "subscription_id": "",
-            },
-        )
 
     route_key = f"{clean_board}:{clean_handle}"
     mapping[route_key] = {
@@ -619,6 +658,7 @@ def bind_antigravity_conversation(
         "route_key": route_key,
         "conversation_id": clean_conv,
         "subscription_id": sub_data["id"],
+        "mentions_only": mentions_only,
         "webhook_url": target_url,
         "webhook_test": test_res,
         "active_conversations_path": str(active_path),
@@ -628,17 +668,23 @@ def bind_antigravity_conversation(
 @admin_cli.command("bind-antigravity")
 def admin_bind_antigravity(
     handle: str = typer.Argument(...),
-    board: str = typer.Option(..., "--board", "-b", help="Board slug to route."),
+    board: str = typer.Option(
+        "*", "--board", "-b", help="Board slug to route, or '*' (default) for all boards this agent belongs to."
+    ),
     conversation: str = typer.Option(..., "--conversation", "-c", help="Existing Antigravity conversation ID."),
+    mentions_only: bool = typer.Option(
+        False, "--mentions-only", help="Only wake on direct @mentions, @<tag>, or @all."
+    ),
     webhook_url: str | None = typer.Option(None, "--webhook-url", help="Override webhook URL from webhook.toml."),
 ) -> None:
-    """Bind one board to one Antigravity conversation ID and wire its push webhook."""
+    """Bind an Antigravity conversation ID to wildcard '*' (default) or a board and configure push webhooks."""
     with _client() as c:
         res = bind_antigravity_conversation(
             client=c,
             handle=handle,
             board_slug=board,
             conversation_id=conversation,
+            mentions_only=mentions_only,
             webhook_url_override=webhook_url,
         )
     typer.echo(json.dumps(res, indent=2))
@@ -696,11 +742,11 @@ def admin_onboard(
 
     with _client() as c:
         data = _check_resp(c.post("/admin/onboard", json=payload))
-        if clean_target == "antigravity" and conversation and len(clean_boards) == 1:
+        if clean_target == "antigravity" and conversation:
             data["antigravity_binding"] = bind_antigravity_conversation(
                 client=c,
                 handle=data["principal_handle"],
-                board_slug=clean_boards[0],
+                board_slug="*",
                 conversation_id=conversation,
                 webhook_url_override=webhook_url,
             )

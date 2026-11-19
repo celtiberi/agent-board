@@ -128,6 +128,16 @@ class CreateSubscriptionRequest(BaseModel):
     principal_handle: str | None = None
 
 
+class UpdateSubscriptionRequest(BaseModel):
+    url: str | None = None
+    boards: list[str] | None = None
+    filter: dict[str, Any] | None = None
+    auth_header: str | None = None
+    clear_auth_header: bool = False
+    min_interval_s: int | None = None
+    debounce_s: int | None = None
+
+
 class CreatePrincipalRequest(BaseModel):
     handle: str
     kind: str = "agent"

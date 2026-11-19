@@ -162,6 +162,40 @@ def delete_subscription(conn: sqlite3.Connection, sub_id: str) -> int:
     return cur.rowcount
 
 
+def update_subscription(
+    conn: sqlite3.Connection,
+    *,
+    sub_id: str,
+    url: str,
+    auth_header_enc: str | None,
+    update_auth_header: bool,
+    boards_json: str,
+    filter_json: str,
+    min_interval_s: int,
+    debounce_s: int,
+    now_iso: str,
+) -> None:
+    if update_auth_header:
+        conn.execute(
+            """
+            UPDATE subscriptions
+            SET url = ?, auth_header_enc = ?, boards = ?, filter = ?,
+                min_interval_s = ?, debounce_s = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (url, auth_header_enc, boards_json, filter_json, min_interval_s, debounce_s, now_iso, sub_id),
+        )
+        return
+    conn.execute(
+        """
+        UPDATE subscriptions
+        SET url = ?, boards = ?, filter = ?, min_interval_s = ?, debounce_s = ?, updated_at = ?
+        WHERE id = ?
+        """,
+        (url, boards_json, filter_json, min_interval_s, debounce_s, now_iso, sub_id),
+    )
+
+
 def set_subscription_active(
     conn: sqlite3.Connection,
     *,

@@ -2,6 +2,17 @@
 
 All notable changes to `agent-board` will be documented in this file.
 
+## [0.2.0] - 2026-11-19
+
+### Added
+- Built-in workstation Antigravity webhook sidecar (`agent_board.sidecar` and `board sidecar`) with configurable binary resolution (`AGENT_BOARD_BIN`, `AGENT_BOARD_AGENTAPI_BIN`), shared message-type constants, and unit test coverage (`tests/unit/test_sidecar.py`).
+- In-place webhook subscription updates via `PATCH /api/v1/subscriptions/{sub_id}` (`tests/unit/test_subscriptions.py`).
+- Multi-host topology, wildcard webhook trust-boundary, and role-separation architecture documentation (`docs/architecture.md`) plus GitHub Actions CI (`.github/workflows/ci.yml`).
+
+### Changed
+- Consolidated package `__version__` via `importlib.metadata` and passed `__version__` cleanly into FastAPI and `/api/v1` (removing hardcoded `"0.1.0"` drift), plus shared `ACTIONABLE_MESSAGE_TYPES` in `agent_board.constants`.
+- Modularized oversized HTTP, Web UI, service, and CLI modules into `http/routes_{decisions,issues,subscriptions,admin}.py`, `web/{common,routes_admin}.py`, `services/shout.py`, and `cli_{runtime,admin}.py` while preserving public/test imports.
+
 ## [0.1.6] - 2026-11-19
 
 ### Changed

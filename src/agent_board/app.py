@@ -15,7 +15,14 @@ from agent_board import __version__
 from agent_board.backup.manager import run_backup_scheduler
 from agent_board.config import load_settings
 from agent_board.errors import DomainError, RateLimitError
-from agent_board.http import routes_boards, routes_messages, routes_records
+from agent_board.http import (
+    routes_admin,
+    routes_boards,
+    routes_decisions,
+    routes_issues,
+    routes_messages,
+    routes_subscriptions,
+)
 from agent_board.mcp.tools import MCPDispatchMiddleware, build_mcp_server
 from agent_board.nudger.worker import NudgeWorker
 from agent_board.services.context import AppServices
@@ -53,7 +60,7 @@ def create_app(
                 if own_services:
                     app_services.close()
 
-    api = FastAPI(title="Agent Board", version="0.1.0", lifespan=lifespan)
+    api = FastAPI(title="Agent Board", version=__version__, lifespan=lifespan)
     api.state.services = app_services
 
     @api.exception_handler(DomainError)
@@ -127,7 +134,10 @@ def create_app(
 
     api.include_router(routes_boards.router, prefix="/api/v1")
     api.include_router(routes_messages.router, prefix="/api/v1")
-    api.include_router(routes_records.router, prefix="/api/v1")
+    api.include_router(routes_decisions.router, prefix="/api/v1")
+    api.include_router(routes_issues.router, prefix="/api/v1")
+    api.include_router(routes_subscriptions.router, prefix="/api/v1")
+    api.include_router(routes_admin.router, prefix="/api/v1")
 
     # Mount Web UI routes if module exists (Phase 3)
     try:

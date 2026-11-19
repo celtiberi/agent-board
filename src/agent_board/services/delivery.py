@@ -306,6 +306,84 @@ def delete_subscription(services: AppServices, ctx: AuthContext, *, sub_id: str)
     return {"id": sub_id, "deleted": True}
 
 
+def update_subscription(
+    services: AppServices,
+    ctx: AuthContext,
+    *,
+    sub_id: str,
+    url: str | None = None,
+    boards: list[str] | None = None,
+    filter_cfg: dict[str, Any] | None = None,
+    auth_header: str | None = None,
+    clear_auth_header: bool = False,
+    min_interval_s: int | None = None,
+    debounce_s: int | None = None,
+) -> dict[str, Any]:
+    """Update mutable webhook subscription fields in place while preserving ID and delivery cursor."""
+    if min_interval_s is not None and min_interval_s < 0:
+        raise ValidationError("min_interval_s must be >= 0")
+    if debounce_s is not None and debounce_s < 0:
+        raise ValidationError("debounce_s must be >= 0")
+    clean_url_input = _validate_webhook_url(url) if url is not None else None
+
+    with services.db.write_tx() as conn:
+        row = delivery_store.get_subscription_by_id(conn, sub_id)
+        if row is None:
+            raise NotFoundError(f"Subscription '{sub_id}' not found")
+        if row["principal_id"] != ctx.principal_id and not ctx.is_server_owner:
+            raise PermissionDeniedError("Cannot update another principal's subscription")
+
+        next_url = clean_url_input if clean_url_input is not None else str(row["url"])
+        next_boards = (
+            [b.strip() for b in boards if b.strip()] or ["*"]
+            if boards is not None
+            else [str(b) for b in json.loads(row["boards"])]
+        )
+        next_filter = dict(json.loads(row["filter"]))
+        if filter_cfg is not None:
+            for k, v in filter_cfg.items():
+                if v is None:
+                    next_filter.pop(k, None)
+                else:
+                    next_filter[k] = v
+        next_filter.setdefault("exclude_self", True)
+        next_filter.setdefault("mentions_only", False)
+
+        next_interval = int(min_interval_s) if min_interval_s is not None else int(row["min_interval_s"])
+        next_debounce = int(debounce_s) if debounce_s is not None else int(row["debounce_s"])
+
+        update_auth = clear_auth_header or auth_header is not None
+        auth_enc: str | None = None
+        if update_auth and not clear_auth_header:
+            clean_auth = normalize_auth_header(auth_header)
+            if clean_auth:
+                auth_enc = services.crypto.encrypt(clean_auth)
+
+        now_iso = utc_now_iso()
+        delivery_store.update_subscription(
+            conn,
+            sub_id=sub_id,
+            url=next_url,
+            auth_header_enc=auth_enc,
+            update_auth_header=update_auth,
+            boards_json=json.dumps(next_boards),
+            filter_json=json.dumps(next_filter),
+            min_interval_s=next_interval,
+            debounce_s=next_debounce,
+            now_iso=now_iso,
+        )
+        record_audit(
+            conn,
+            ctx=ctx,
+            action="subscription.update",
+            ok=True,
+            target=sub_id,
+            detail={"url": next_url, "boards": next_boards},
+        )
+        updated = delivery_store.get_subscription_by_id(conn, sub_id)
+        return subscription_to_dict(updated)
+
+
 def reenable_subscription(services: AppServices, ctx: AuthContext, *, sub_id: str) -> dict[str, Any]:
     with services.db.write_tx() as conn:
         row = delivery_store.get_subscription_by_id(conn, sub_id)

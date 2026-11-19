@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from agent_board.constants import ACTIONABLE_MESSAGE_TYPES
 from agent_board.errors import NotFoundError, ValidationError
 from agent_board.ids import RESERVED_HANDLES, is_valid_handle
 from agent_board.nudger.worker import NudgeWorker
@@ -13,15 +14,6 @@ from agent_board.services import delivery as delivery_svc
 from agent_board.services.context import ROLE_RANK, AppServices, AuthContext
 from agent_board.store import boards as boards_store
 from agent_board.store import principals as principals_store
-
-ACTIONABLE_MESSAGE_TYPES: tuple[str, ...] = (
-    "task",
-    "question",
-    "issue",
-    "decision",
-    "retest_report",
-    "status",
-)
 
 
 def build_env_var_name(handle: str) -> str:

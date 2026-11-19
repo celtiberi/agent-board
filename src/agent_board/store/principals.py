@@ -67,6 +67,19 @@ def update_principal_tags(conn: sqlite3.Connection, principal_id: str, tags_json
     )
 
 
+def update_principal_identity(
+    conn: sqlite3.Connection,
+    principal_id: str,
+    *,
+    handle: str,
+    display_name: str,
+) -> None:
+    conn.execute(
+        "UPDATE principals SET handle = ?, display_name = ? WHERE id = ?",
+        (handle, display_name, principal_id),
+    )
+
+
 def update_principal_disabled(conn: sqlite3.Connection, principal_id: str, disabled_at: str | None) -> None:
     conn.execute(
         "UPDATE principals SET disabled_at = ? WHERE id = ?",

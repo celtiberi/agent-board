@@ -2,6 +2,11 @@
 
 All notable changes to `agent-board` will be documented in this file.
 
+## [0.1.4] - 2026-11-19
+
+### Added
+- Principal identity renaming (`PATCH /api/v1/admin/principals/{handle}` and `board admin rename-principal <handle> [--new-handle] [--name]`) so principals can change `@handle` or display name while preserving their ID, tokens, memberships, subscriptions, and message history.
+
 ## [0.1.3] - 2026-11-19
 
 ### Added

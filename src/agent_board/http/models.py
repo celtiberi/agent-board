@@ -141,6 +141,11 @@ class SetPrincipalTagsRequest(BaseModel):
     tags: list[str] = Field(default_factory=list)
 
 
+class UpdatePrincipalRequest(BaseModel):
+    new_handle: str | None = None
+    display_name: str | None = None
+
+
 class ShoutRequest(BaseModel):
     body_md: str
     tag: str | None = None

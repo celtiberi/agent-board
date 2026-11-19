@@ -10,7 +10,7 @@ from typing import Any
 import jsonschema
 
 from agent_board.errors import ConflictError, NotFoundError, PermissionDeniedError, ValidationError
-from agent_board.ids import new_ulid, utc_now_iso
+from agent_board.ids import BROADCAST_MENTIONS, new_ulid, utc_now_iso
 from agent_board.secrets_scan import scan_for_secrets
 from agent_board.services.auth import record_audit, require_board_role
 from agent_board.services.context import AppServices, AuthContext
@@ -54,12 +54,44 @@ def validate_message_data(services: AppServices, msg_type: str, data: Any) -> di
     return data
 
 
-def _extract_mentions(conn: sqlite3.Connection, body_md: str) -> list[sqlite3.Row]:
-    handles = list(dict.fromkeys(_MENTION_RE.findall(body_md.lower())))
-    if not handles:
-        return []
-    rows = principals_store.get_principals_by_handles(conn, handles)
-    return [r for r in rows if r["kind"] != "system"]
+def _extract_mentions(
+    conn: sqlite3.Connection,
+    body_md: str,
+    *,
+    board_id: str,
+    author_id: str,
+) -> tuple[list[str], bool]:
+    """Resolve explicit @handle mentions on this board and detect @all/@everyone broadcasts."""
+    raw_handles = list(dict.fromkeys(_MENTION_RE.findall(body_md.lower())))
+    if not raw_handles:
+        return [], False
+
+    is_broadcast = any(h in BROADCAST_MENTIONS for h in raw_handles)
+    members = boards_store.list_memberships_for_board(conn, board_id)
+    active_members = [m for m in members if m["kind"] != "system" and m["disabled_at"] is None]
+    member_ids = {str(m["principal_id"]) for m in active_members}
+
+    direct_handles = [h for h in raw_handles if h not in BROADCAST_MENTIONS]
+    mentioned_ids: list[str] = []
+    if direct_handles:
+        rows = principals_store.get_principals_by_handles(conn, direct_handles)
+        for r in rows:
+            if (
+                r["kind"] != "system"
+                and r["disabled_at"] is None
+                and (bool(r["is_server_owner"]) or str(r["id"]) in member_ids)
+            ):
+                mentioned_ids.append(str(r["id"]))
+
+    if is_broadcast:
+        seen = set(mentioned_ids)
+        for m in active_members:
+            pid = str(m["principal_id"])
+            if pid != author_id and pid not in seen:
+                mentioned_ids.append(pid)
+                seen.add(pid)
+
+    return mentioned_ids, is_broadcast
 
 
 def _hydrate_messages(conn: sqlite3.Connection, rows: list[sqlite3.Row]) -> list[dict[str, Any]]:
@@ -206,8 +238,12 @@ def post_message_in_tx(
                 raise ConflictError(f"Attachment '{att_id}' is already attached to a message")
 
     warnings = scan_for_secrets(body_md)
-    mentioned_rows = _extract_mentions(conn, body_md)
-    mentioned_ids = [r["id"] for r in mentioned_rows]
+    mentioned_ids, is_broadcast = _extract_mentions(
+        conn,
+        body_md,
+        board_id=board["id"],
+        author_id=ctx.principal_id,
+    )
 
     msg_id = new_ulid()
     seq = boards_store.allocate_next_seq(conn, board["id"])
@@ -260,6 +296,7 @@ def post_message_in_tx(
         author_id=ctx.principal_id,
         msg_type=msg_type,
         mentioned_principal_ids=set(mentioned_ids),
+        is_broadcast=is_broadcast,
         now_iso=ts,
     )
     row = messages_store.get_message_by_id(conn, msg_id)
@@ -381,8 +418,12 @@ def edit_message(
             )
             now_iso = utc_now_iso()
             warnings = scan_for_secrets(body_md)
-            mentioned_rows = _extract_mentions(conn, body_md)
-            mentioned_ids = [r["id"] for r in mentioned_rows]
+            mentioned_ids, is_broadcast = _extract_mentions(
+                conn,
+                body_md,
+                board_id=board["id"],
+                author_id=ctx.principal_id,
+            )
 
             new_id = new_ulid()
             seq = boards_store.allocate_next_seq(conn, board["id"])
@@ -427,6 +468,7 @@ def edit_message(
                 author_id=ctx.principal_id,
                 msg_type=target["type"],
                 mentioned_principal_ids=set(mentioned_ids),
+                is_broadcast=is_broadcast,
                 now_iso=now_iso,
             )
             record_audit(

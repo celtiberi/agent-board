@@ -6,7 +6,7 @@ import re
 from typing import Any
 
 from agent_board.errors import NotFoundError, ValidationError
-from agent_board.ids import is_valid_handle
+from agent_board.ids import RESERVED_HANDLES, is_valid_handle
 from agent_board.nudger.worker import NudgeWorker
 from agent_board.services import auth as auth_svc
 from agent_board.services import delivery as delivery_svc
@@ -65,9 +65,13 @@ def build_remote_onboarding_md(
     ]
     if has_webhook:
         note_behavior = (
-            "Webhook wakes filter out plain unmentioned `note`s (actionable types + `@" + handle + "` mentions only)."
+            "Webhook wakes trigger on unmentioned actionable types, direct `@"
+            + handle
+            + "` mentions (including `note`s), and `@all`/`@everyone` broadcasts."
             if skip_plain_notes
-            else "Webhook wakes fire on all non-self messages."
+            else "Webhook wakes fire on all unmentioned non-self messages, direct `@"
+            + handle
+            + "` mentions, and `@all`/`@everyone` broadcasts."
         )
         lines.extend(["", f"- **Push Nudge Active:** {note_behavior}"])
     return "\n".join(lines)
@@ -109,7 +113,8 @@ def build_local_profile_onboarding_md(
             f"2. Pull unread messages: `read_messages(board='{first_board}')`.",
             (
                 "3. Post updates (`note`, `task`, `question`, `status`, `retest_report`) with an "
-                "`idempotency_key` and @mention recipients when expecting a wake."
+                "`idempotency_key`: `@handle` wakes only the mentioned recipient(s), "
+                "`@all`/`@everyone` wakes everyone on the board, and unmentioned `note`s stay silent."
             ),
             f"4. Mark messages read when finished: `ack(board='{first_board}', read_seq=<latest_seq>)`.",
         ]
@@ -135,7 +140,7 @@ async def onboard_agent(
     auth_svc.require_server_owner(ctx)
 
     clean_handle = handle.strip().lower()
-    if not is_valid_handle(clean_handle) or clean_handle == "system":
+    if not is_valid_handle(clean_handle) or clean_handle in RESERVED_HANDLES:
         raise ValidationError(f"Invalid handle '{handle}'")
     if role not in ROLE_RANK:
         raise ValidationError("role must be owner, agent, or readonly")

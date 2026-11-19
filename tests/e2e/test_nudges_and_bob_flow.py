@@ -503,3 +503,214 @@ async def test_paused_routine_resume_reprobe_ack_and_test_nudge_recovery(env: Bo
         ]
         == 0
     )
+
+
+async def test_targeted_mention_broadcast_and_non_member_wake_routing(env: BoardTestEnv) -> None:
+    from agent_board.services.auth import authenticate_bearer, create_principal, create_token
+
+    create_principal(env.services, env.owner_ctx, handle="alice", kind="agent", display_name="Alice")
+    create_principal(env.services, env.owner_ctx, handle="observer", kind="agent", display_name="Observer")
+    create_principal(env.services, env.owner_ctx, handle="outsider", kind="agent", display_name="Outsider")
+    set_membership(env.services, env.owner_ctx, board_slug="alpha", principal_handle="alice", role="agent")
+    set_membership(env.services, env.owner_ctx, board_slug="alpha", principal_handle="observer", role="agent")
+
+    boards_svc.create_board(
+        env.services,
+        env.owner_ctx,
+        slug="beta",
+        name="Beta Project",
+        purpose="Separate board for outsider membership isolation.",
+    )
+    set_membership(env.services, env.owner_ctx, board_slug="beta", principal_handle="outsider", role="agent")
+
+    alice_ctx = authenticate_bearer(
+        env.services,
+        create_token(
+            env.services, env.owner_ctx, principal_handle="alice", name="alice-tok", board_scope=["*"], max_role="agent"
+        )["token"],
+    )
+    observer_ctx = authenticate_bearer(
+        env.services,
+        create_token(
+            env.services,
+            env.owner_ctx,
+            principal_handle="observer",
+            name="observer-tok",
+            board_scope=["*"],
+            max_role="agent",
+        )["token"],
+    )
+    outsider_ctx = authenticate_bearer(
+        env.services,
+        create_token(
+            env.services,
+            env.owner_ctx,
+            principal_handle="outsider",
+            name="outsider-tok",
+            board_scope=["*"],
+            max_role="agent",
+        )["token"],
+    )
+
+    received: dict[str, list[dict[str, Any]]] = {"bob": [], "alice": [], "dev": [], "observer": [], "outsider": []}
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        target = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content)
+        jsonschema.validate(body, _NUDGE_SCHEMA)
+        received[target].append(body)
+        return httpx.Response(200, json={"ok": True})
+
+    sub_bob = delivery_svc.create_subscription(
+        env.services,
+        env.bob_ctx,
+        url="https://hooks.example/bob",
+        boards=["alpha"],
+        filter_cfg={
+            "types": ["task", "question", "decision", "issue", "retest_report", "status"],
+            "mentions_only": False,
+            "exclude_self": True,
+        },
+        min_interval_s=0,
+        debounce_s=0,
+    )
+    sub_alice = delivery_svc.create_subscription(
+        env.services,
+        alice_ctx,
+        url="https://hooks.example/alice",
+        boards=["alpha"],
+        filter_cfg={
+            "types": ["task", "question", "decision", "issue", "retest_report", "status"],
+            "mentions_only": False,
+            "exclude_self": True,
+        },
+        min_interval_s=0,
+        debounce_s=0,
+    )
+    sub_dev = delivery_svc.create_subscription(
+        env.services,
+        env.dev_ctx,
+        url="https://hooks.example/dev",
+        boards=["alpha"],
+        filter_cfg={
+            "types": ["task", "question", "decision", "issue", "retest_report", "status"],
+            "mentions_only": False,
+            "exclude_self": True,
+        },
+        min_interval_s=0,
+        debounce_s=0,
+    )
+    sub_obs = delivery_svc.create_subscription(
+        env.services,
+        observer_ctx,
+        url="https://hooks.example/observer",
+        boards=["alpha"],
+        filter_cfg={
+            "types": ["task", "question", "decision", "issue", "retest_report", "status"],
+            "mentions_only": True,
+            "exclude_self": True,
+        },
+        min_interval_s=0,
+        debounce_s=0,
+    )
+    delivery_svc.create_subscription(
+        env.services,
+        outsider_ctx,
+        url="https://hooks.example/outsider",
+        boards=["*"],
+        filter_cfg={
+            "types": ["task", "question", "decision", "issue", "retest_report", "status"],
+            "mentions_only": False,
+            "exclude_self": True,
+        },
+        min_interval_s=0,
+        debounce_s=0,
+    )
+
+    worker = NudgeWorker(env.services, transport=httpx.MockTransport(_handler))
+
+    async def _drain() -> dict[str, list[dict[str, Any]]]:
+        await worker.process_due_once(now=utc_now() + timedelta(seconds=5))
+        snapshot = {k: list(v) for k, v in received.items()}
+        for lst in received.values():
+            lst.clear()
+        return snapshot
+
+    # 1. Direct @bob on status/task/retest_report/note wakes ONLY bob (never alice, observer, or author).
+    for mtype, body in (
+        ("status", "@bob deploy ready"),
+        ("task", "Check logs @bob"),
+        ("retest_report", "@bob smoke green"),
+        ("note", "FYI @bob check when free"),
+    ):
+        messages_svc.post_message(env.services, env.dev_ctx, board_slug="alpha", msg_type=mtype, body_md=body)
+        res = await _drain()
+        assert len(res["bob"]) == 1, f"expected 1 wake for bob on {mtype}"
+        assert res["bob"][0]["principal"] == "bob"
+        assert res["bob"][0]["subscription_id"] == sub_bob["id"]
+        assert res["bob"][0]["mentioned"] is True
+        assert res["alice"] == []
+        assert res["dev"] == []
+        assert res["observer"] == []
+
+    # Advance bob's cursor so unmentioned test below keeps accurate unread summary checks.
+    latest_seq = messages_svc.post_message(
+        env.services, env.dev_ctx, board_slug="alpha", msg_type="note", body_md="Plain silent note"
+    )["seq"]
+    # Unmentioned note wakes nobody.
+    res_silent = await _drain()
+    assert all(len(v) == 0 for v in res_silent.values())
+    delivery_svc.ack_cursor(env.services, env.bob_ctx, board_slug="alpha", read_seq=latest_seq)
+    delivery_svc.ack_cursor(env.services, alice_ctx, board_slug="alpha", read_seq=latest_seq)
+    delivery_svc.ack_cursor(env.services, observer_ctx, board_slug="alpha", read_seq=latest_seq)
+
+    # 2. Multi-recipient @bob @alice wakes both bob and alice, not observer or author.
+    m_multi = messages_svc.post_message(
+        env.services, env.dev_ctx, board_slug="alpha", msg_type="note", body_md="Syncing @bob and @alice"
+    )
+    res_multi = await _drain()
+    assert len(res_multi["bob"]) == 1 and res_multi["bob"][0]["subscription_id"] == sub_bob["id"]
+    assert len(res_multi["alice"]) == 1 and res_multi["alice"][0]["subscription_id"] == sub_alice["id"]
+    assert res_multi["dev"] == []
+    assert res_multi["observer"] == []
+    for ctx_item in (env.bob_ctx, alice_ctx):
+        delivery_svc.ack_cursor(env.services, ctx_item, board_slug="alpha", read_seq=m_multi["seq"])
+
+    # 3. Broadcast @all (even on note) wakes all subscribed members including mentions_only=True, excluding author.
+    m_all = messages_svc.post_message(
+        env.services, env.dev_ctx, board_slug="alpha", msg_type="note", body_md="PSA @all please update cursors"
+    )
+    assert set(m_all["mentions"]) == {"bob", "alice", "observer", "owner", "viewer"}
+    res_all = await _drain()
+    assert len(res_all["bob"]) == 1 and res_all["bob"][0]["mentioned"] is True
+    assert len(res_all["alice"]) == 1 and res_all["alice"][0]["mentioned"] is True
+    assert len(res_all["observer"]) == 1 and res_all["observer"][0]["mentioned"] is True
+    assert res_all["observer"][0]["subscription_id"] == sub_obs["id"]
+    assert res_all["dev"] == []
+    assert res_all["outsider"] == []
+    for ctx_item in (env.bob_ctx, alice_ctx, observer_ctx):
+        delivery_svc.ack_cursor(env.services, ctx_item, board_slug="alpha", read_seq=m_all["seq"])
+
+    # 4. Broadcast @everyone also wakes everyone on the board except author.
+    m_everyone = messages_svc.post_message(
+        env.services, alice_ctx, board_slug="alpha", msg_type="status", body_md="@everyone release cut"
+    )
+    res_everyone = await _drain()
+    assert len(res_everyone["bob"]) == 1 and res_everyone["bob"][0]["mentioned"] is True
+    assert len(res_everyone["dev"]) == 1 and res_everyone["dev"][0]["subscription_id"] == sub_dev["id"]
+    assert len(res_everyone["observer"]) == 1
+    assert res_everyone["alice"] == []
+    for ctx_item in (env.bob_ctx, env.dev_ctx, observer_ctx):
+        delivery_svc.ack_cursor(env.services, ctx_item, board_slug="alpha", read_seq=m_everyone["seq"])
+
+    # 5. Unmentioned actionable status wakes non-mentions_only members (not mentions_only observer);
+    #    mentioning a non-member (@outsider) does not leak or block normal board delivery.
+    m_outsider = messages_svc.post_message(
+        env.services, env.dev_ctx, board_slug="alpha", msg_type="status", body_md="Deploying v2 (@outsider)"
+    )
+    assert m_outsider["mentions"] == []
+    res_outsider = await _drain()
+    assert len(res_outsider["bob"]) == 1 and res_outsider["bob"][0]["mentioned"] is False
+    assert len(res_outsider["alice"]) == 1 and res_outsider["alice"][0]["mentioned"] is False
+    assert res_outsider["observer"] == []
+    assert res_outsider["outsider"] == []

@@ -24,6 +24,7 @@ from agent_board.errors import (
     ValidationError,
 )
 from agent_board.ids import (
+    RESERVED_HANDLES,
     dt_to_iso,
     generate_api_token,
     hash_token,
@@ -382,7 +383,7 @@ def create_principal(
 ) -> dict[str, Any]:
     require_server_owner(ctx)
     clean_handle = handle.strip().lower()
-    if not is_valid_handle(clean_handle) or clean_handle == "system":
+    if not is_valid_handle(clean_handle) or clean_handle in RESERVED_HANDLES:
         raise ValidationError(f"Invalid handle '{handle}'")
     if kind not in ("human", "agent"):
         raise ValidationError("kind must be 'human' or 'agent'")

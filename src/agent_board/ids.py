@@ -21,6 +21,8 @@ _DECISION_REF_RE = re.compile(r"^[Dd]-(\d+)$")
 _ISSUE_REF_RE = re.compile(r"^[Ii]-(\d+)$")
 _SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]?$")
 _HANDLE_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,48}[a-z0-9]?$")
+BROADCAST_MENTIONS = frozenset({"all", "everyone"})
+RESERVED_HANDLES = frozenset({"system", *BROADCAST_MENTIONS})
 
 
 def _encode_base32(value: int, length: int) -> str:

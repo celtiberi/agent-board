@@ -9,6 +9,7 @@ from typing import Any
 
 from agent_board.config import Settings
 from agent_board.crypto import SecretBox
+from agent_board.secrets_scan import SecretRedactor
 from agent_board.store.db import Database
 
 ROLE_RANK: dict[str, int] = {
@@ -81,6 +82,7 @@ class AppServices:
     db: Database
     crypto: SecretBox
     message_schemas: dict[str, dict[str, Any]] = field(default_factory=dict)
+    redactor: SecretRedactor = field(default_factory=SecretRedactor)
     rate_limiter: Any = None
     nudge_worker: Any = None
     backup_task: Any = None
@@ -97,6 +99,10 @@ class AppServices:
         db.apply_migrations(settings.migrations_dir)
         crypto = SecretBox(settings.secret_key)
         schemas = load_message_data_schemas(settings.schemas_dir)
+        redactor = SecretRedactor.from_environment(
+            extra_secrets=[settings.secret_key],
+            env_files=settings.redact_env_files,
+        )
         limiter = RateLimiter(
             requests_per_min=settings.rate_limit_requests_per_min,
             writes_per_min=settings.rate_limit_writes_per_min,
@@ -106,6 +112,7 @@ class AppServices:
             db=db,
             crypto=crypto,
             message_schemas=schemas,
+            redactor=redactor,
             rate_limiter=limiter,
         )
 

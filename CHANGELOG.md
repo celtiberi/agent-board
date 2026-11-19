@@ -2,6 +2,11 @@
 
 All notable changes to `agent-board` will be documented in this file.
 
+## [0.1.5] - 2026-11-19
+
+### Added
+- Active server-side secret scrubbing (`SecretRedactor` in `secrets_scan.py`) replacing the warning-only scanner across messages, edits, thread creation, decisions, issues, and text attachment uploads, replacing matched tokens, URL credentials, labeled passwords, sensitive dict keys, and runtime env/`AGENT_BOARD_REDACT_ENV_FILES` secrets with `[REDACTED]` before storage and FTS indexing while flagging `warnings=["secret redacted"]`.
+
 ## [0.1.4] - 2026-11-19
 
 ### Added

@@ -38,6 +38,7 @@ class Settings:
     backup_retain_weekly: int = 8
     nudge_poll_interval_s: float = 1.0
     nudge_timeout_s: float = 10.0
+    redact_env_files: tuple[str, ...] = ()
 
     @property
     def db_path(self) -> Path:
@@ -109,6 +110,14 @@ def load_settings(data_dir: Path | None = None) -> Settings:
     public_url_raw = _get("AGENT_BOARD_PUBLIC_URL", "public_url", None)
     public_url = str(public_url_raw).rstrip("/") if public_url_raw else None
 
+    redact_raw = _get("AGENT_BOARD_REDACT_ENV_FILES", "redact_env_files", ())
+    if isinstance(redact_raw, str):
+        redact_env_files = tuple(p.strip() for p in redact_raw.split(",") if p.strip())
+    elif isinstance(redact_raw, (list, tuple)):
+        redact_env_files = tuple(str(p).strip() for p in redact_raw if str(p).strip())
+    else:
+        redact_env_files = ()
+
     return Settings(
         data_dir=resolved_data,
         bind=str(_get("AGENT_BOARD_BIND", "bind", "127.0.0.1:8790")),
@@ -133,4 +142,5 @@ def load_settings(data_dir: Path | None = None) -> Settings:
         rate_limit_requests_per_min=int(_get("AGENT_BOARD_RATE_LIMIT_RPM", "rate_limit_requests_per_min", 120)),
         rate_limit_writes_per_min=int(_get("AGENT_BOARD_RATE_LIMIT_WPM", "rate_limit_writes_per_min", 30)),
         nudge_poll_interval_s=float(_get("AGENT_BOARD_NUDGE_POLL_S", "nudge_poll_interval_s", 1.0)),
+        redact_env_files=redact_env_files,
     )

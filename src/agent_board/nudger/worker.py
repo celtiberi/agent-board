@@ -84,7 +84,7 @@ class NudgeWorker:
             "nudge_id": nudge_id,
             "sent_at": now_iso,
         }
-        return await self._deliver_http(
+        res = await self._deliver_http(
             url=sub["url"],
             auth_header_enc=sub["auth_header_enc"],
             hmac_secret_enc=sub["hmac_secret_enc"],
@@ -92,6 +92,15 @@ class NudgeWorker:
             timestamp=int(now.timestamp()),
             payload=payload,
         )
+        if res["ok"]:
+            with self.services.db.write_tx() as wconn:
+                delivery_store.heal_subscription_delivery(
+                    wconn,
+                    sub_id=sub_id,
+                    now_iso=now_iso,
+                    force_enable=False,
+                )
+        return res
 
     async def _deliver_http(
         self,
@@ -153,6 +162,13 @@ class NudgeWorker:
             if read_seq >= int(row["latest_seq"]):
                 with self.services.db.write_tx() as conn:
                     delivery_store.mark_outbox_suppressed(conn, outbox_id=row["id"], reason="already_acked")
+                    if int(row["failure_count"]) > 0:
+                        delivery_store.heal_subscription_delivery(
+                            conn,
+                            sub_id=row["subscription_id"],
+                            now_iso=now_iso,
+                            force_enable=False,
+                        )
                 continue
 
             unread_count, types, mentioned = delivery_store.get_unread_summary_for_nudge(

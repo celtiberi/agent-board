@@ -47,6 +47,13 @@ def ack_cursor(
                 read_seq=target_seq,
                 updated_at=now_iso,
             )
+            delivery_store.heal_principal_delivery_on_activity(
+                conn,
+                principal_id=ctx.principal_id,
+                now_iso=now_iso,
+                board_id=board["id"],
+                acked_seq=effective_seq,
+            )
             unread = delivery_store.count_unread_for_principal(conn, board["id"], ctx.principal_id, effective_seq)
             record_audit(
                 conn,
@@ -130,11 +137,14 @@ def enqueue_outbox_for_message(
         ):
             continue
         debounce_dt = now_dt + timedelta(seconds=int(sub["debounce_s"]))
+        next_attempt = debounce_dt
         if sub["last_sent_at"]:
             interval_dt = iso_to_dt(sub["last_sent_at"]) + timedelta(seconds=int(sub["min_interval_s"]))
-            next_attempt = max(debounce_dt, interval_dt)
-        else:
-            next_attempt = debounce_dt
+            next_attempt = max(next_attempt, interval_dt)
+        if int(sub["failure_count"]) > 0 and sub["updated_at"]:
+            reprobe_floor_s = max(int(sub["min_interval_s"]), 300)
+            reprobe_dt = iso_to_dt(sub["updated_at"]) + timedelta(seconds=reprobe_floor_s)
+            next_attempt = max(next_attempt, reprobe_dt)
 
         delivery_store.enqueue_outbox_pending(
             conn,
@@ -291,12 +301,11 @@ def reenable_subscription(services: AppServices, ctx: AuthContext, *, sub_id: st
             raise NotFoundError(f"Subscription '{sub_id}' not found")
         if row["principal_id"] != ctx.principal_id and not ctx.is_server_owner:
             raise PermissionDeniedError("Cannot modify another principal's subscription")
-        delivery_store.set_subscription_active(
+        delivery_store.heal_subscription_delivery(
             conn,
             sub_id=sub_id,
-            active=True,
-            disabled_reason=None,
-            updated_at=utc_now_iso(),
+            now_iso=utc_now_iso(),
+            force_enable=True,
         )
         record_audit(conn, ctx=ctx, action="subscription.enable", ok=True, target=sub_id)
         return subscription_to_dict(delivery_store.get_subscription_by_id(conn, sub_id))

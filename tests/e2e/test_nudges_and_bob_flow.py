@@ -14,7 +14,7 @@ from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 
 from agent_board.app import create_app
-from agent_board.ids import dt_to_iso, new_ulid, utc_now
+from agent_board.ids import dt_to_iso, iso_to_dt, new_ulid, utc_now
 from agent_board.nudger.signing import verify_nudge_signature
 from agent_board.nudger.worker import NudgeWorker
 from agent_board.services import boards as boards_svc
@@ -341,3 +341,165 @@ async def test_wildcard_subscription_follows_board_memberships(env: BoardTestEnv
     assert test_res["ok"] is True
     assert len(received) == 2
     assert received[-1]["board"] == "alpha"
+
+
+async def test_paused_routine_resume_reprobe_ack_and_test_nudge_recovery(env: BoardTestEnv) -> None:
+    paused = True
+    delivered: list[dict[str, Any]] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        if paused:
+            return httpx.Response(400, json={"success": False, "error": "Routine is disabled"})
+        body = json.loads(request.content)
+        delivered.append(body)
+        return httpx.Response(200, json={"ok": True})
+
+    sub = delivery_svc.create_subscription(
+        env.services,
+        env.bob_ctx,
+        url="https://routine.example/webhook",
+        boards=["alpha"],
+        min_interval_s=60,
+        debounce_s=10,
+    )
+    worker = NudgeWorker(env.services, transport=httpx.MockTransport(_handler))
+
+    # 1. Fail 8 times while paused -> outbox enters 6h backoff (failure_count == 8).
+    messages_svc.post_message(env.services, env.dev_ctx, board_slug="alpha", msg_type="task", body_md="Task 1 @bob")
+    sim_t = utc_now()
+    for _ in range(8):
+        with env.services.db.write_tx() as conn:
+            conn.execute(
+                "UPDATE outbox SET next_attempt_at = ? WHERE subscription_id = ? AND status = 'pending'",
+                (dt_to_iso(sim_t), sub["id"]),
+            )
+        assert await worker.process_due_once(now=sim_t) == 1
+
+    with env.services.db.write_tx() as conn:
+        pending_row = conn.execute(
+            "SELECT * FROM outbox WHERE subscription_id = ? AND status = 'pending'", (sub["id"],)
+        ).fetchone()
+        assert pending_row is not None
+        assert int(pending_row["attempt"]) == 8
+        assert iso_to_dt(pending_row["next_attempt_at"]) >= sim_t + timedelta(hours=5)
+
+    # 2. Rapid bursts within 5 minutes of last failure coalesce at the 5-minute reprobe floor (no retry storm).
+    one_min_ago = dt_to_iso(utc_now() - timedelta(seconds=60))
+    far_future = dt_to_iso(utc_now() + timedelta(hours=6))
+    with env.services.db.write_tx() as conn:
+        conn.execute("UPDATE subscriptions SET updated_at = ? WHERE id = ?", (one_min_ago, sub["id"]))
+        conn.execute(
+            "UPDATE outbox SET next_attempt_at = ? WHERE subscription_id = ? AND status = 'pending'",
+            (far_future, sub["id"]),
+        )
+    now_before = utc_now()
+    messages_svc.post_message(env.services, env.dev_ctx, board_slug="alpha", msg_type="task", body_md="Task 2 @bob")
+    with env.services.db.write_tx() as conn:
+        row2 = conn.execute(
+            "SELECT next_attempt_at FROM outbox WHERE subscription_id = ? AND status = 'pending'", (sub["id"],)
+        ).fetchone()
+    reprobe_at = iso_to_dt(row2["next_attempt_at"])
+    assert now_before + timedelta(seconds=200) <= reprobe_at <= now_before + timedelta(seconds=250)
+
+    # Posting another message immediately does NOT advance beyond the reprobe floor.
+    messages_svc.post_message(env.services, env.dev_ctx, board_slug="alpha", msg_type="task", body_md="Task 3 @bob")
+    assert await worker.process_due_once(now=utc_now() + timedelta(seconds=15)) == 0
+
+    # 3. Once routine resumes (>5m after last failure), a new post pulls next_attempt_at forward and succeeds.
+    paused = False
+    ten_min_ago = dt_to_iso(utc_now() - timedelta(minutes=10))
+    with env.services.db.write_tx() as conn:
+        conn.execute("UPDATE subscriptions SET updated_at = ? WHERE id = ?", (ten_min_ago, sub["id"]))
+        conn.execute(
+            "UPDATE outbox SET next_attempt_at = ? WHERE subscription_id = ? AND status = 'pending'",
+            (far_future, sub["id"]),
+        )
+    msg4 = messages_svc.post_message(
+        env.services, env.dev_ctx, board_slug="alpha", msg_type="task", body_md="Task 4 @bob"
+    )
+    assert await worker.process_due_once(now=utc_now() + timedelta(seconds=15)) == 1
+    assert len(delivered) == 1
+    assert delivered[-1]["latest_seq"] == msg4["seq"]
+
+    sub_after_send = next(s for s in delivery_svc.list_subscriptions(env.services, env.bob_ctx) if s["id"] == sub["id"])
+    assert sub_after_send["failure_count"] == 0
+
+    # 4. Manual ack suppresses backed-off pending row and resets failure_count immediately.
+    paused = True
+    msg5 = messages_svc.post_message(
+        env.services, env.dev_ctx, board_slug="alpha", msg_type="task", body_md="Task 5 @bob"
+    )
+    t_fail = iso_to_dt(msg5["created_at"]) + timedelta(seconds=90)
+    assert await worker.process_due_once(now=t_fail) == 1
+    assert next(s for s in delivery_svc.list_subscriptions(env.services, env.bob_ctx) if s["id"] == sub["id"])[
+        "failure_count"
+    ] == 1
+
+    delivery_svc.ack_cursor(env.services, env.bob_ctx, board_slug="alpha", read_seq=msg5["seq"])
+    sub_after_ack = next(s for s in delivery_svc.list_subscriptions(env.services, env.bob_ctx) if s["id"] == sub["id"])
+    assert sub_after_ack["failure_count"] == 0
+    with env.services.db.write_tx() as conn:
+        suppressed = conn.execute(
+            "SELECT status, last_error FROM outbox WHERE subscription_id = ? AND latest_seq = ?",
+            (sub["id"], msg5["seq"]),
+        ).fetchone()
+        assert suppressed is not None
+        assert suppressed["status"] == "suppressed"
+        assert suppressed["last_error"] == "already_acked"
+
+    paused = False
+    msg6 = messages_svc.post_message(
+        env.services, env.dev_ctx, board_slug="alpha", msg_type="task", body_md="Task 6 @bob"
+    )
+    assert await worker.process_due_once(now=utc_now() + timedelta(seconds=90)) == 1
+    assert delivered[-1]["latest_seq"] == msg6["seq"]
+
+    # 5. send_test_nudge re-enables Auto-disabled subscriptions, clears failure_count, and expedites pending rows;
+    #    posting as the agent also clears failure_count / Auto-disabled state.
+    paused = True
+    msg7 = messages_svc.post_message(
+        env.services, env.dev_ctx, board_slug="alpha", msg_type="task", body_md="Task 7 @bob"
+    )
+    sim_auto = utc_now() + timedelta(seconds=120)
+    for _ in range(20):
+        with env.services.db.write_tx() as conn:
+            conn.execute(
+                "UPDATE outbox SET next_attempt_at = ? WHERE subscription_id = ? AND status = 'pending'",
+                (dt_to_iso(sim_auto), sub["id"]),
+            )
+        await worker.process_due_once(now=sim_auto)
+        sim_auto += timedelta(seconds=1)
+
+    sub_dead = next(s for s in delivery_svc.list_subscriptions(env.services, env.bob_ctx) if s["id"] == sub["id"])
+    assert sub_dead["active"] is False
+    assert str(sub_dead["disabled_reason"]).startswith("Auto-disabled")
+
+    # Successful test nudge auto-recovers and delivers the backed-off unread msg7 on next poll.
+    paused = False
+    test_ok = await worker.send_test_nudge(sub_id=sub["id"])
+    assert test_ok["ok"] is True
+    sub_healed = next(s for s in delivery_svc.list_subscriptions(env.services, env.bob_ctx) if s["id"] == sub["id"])
+    assert sub_healed["active"] is True
+    assert sub_healed["failure_count"] == 0
+    assert sub_healed["disabled_reason"] is None
+
+    assert await worker.process_due_once(now=utc_now() + timedelta(seconds=2)) == 1
+    assert delivered[-1]["latest_seq"] == msg7["seq"]
+
+    # Agent posting a message also clears failure_count on its subscriptions.
+    paused = True
+    messages_svc.post_message(env.services, env.dev_ctx, board_slug="alpha", msg_type="task", body_md="Task 8 @bob")
+    assert await worker.process_due_once(now=utc_now() + timedelta(seconds=90)) == 1
+    assert (
+        next(s for s in delivery_svc.list_subscriptions(env.services, env.bob_ctx) if s["id"] == sub["id"])[
+            "failure_count"
+        ]
+        == 1
+    )
+    messages_svc.post_message(env.services, env.bob_ctx, board_slug="alpha", msg_type="status", body_md="Back online.")
+    assert (
+        next(s for s in delivery_svc.list_subscriptions(env.services, env.bob_ctx) if s["id"] == sub["id"])[
+            "failure_count"
+        ]
+        == 0
+    )

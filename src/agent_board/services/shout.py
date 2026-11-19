@@ -26,7 +26,7 @@ def shout(
     dry_run: bool = False,
 ) -> dict[str, Any]:
     """Server-owner cross-board announcement targeted by principal tag or sent to all active project boards."""
-    from agent_board.services.messages import _MENTION_RE, post_message_in_tx
+    from agent_board.services.messages import _MENTION_RE, _strip_markdown_code, post_message_in_tx
 
     require_server_owner(ctx)
     clean_body = body_md.strip()
@@ -48,7 +48,7 @@ def shout(
     clean_thread = thread_title.strip() or "general"
     exclude_set = {"ops", *(b.strip().lower() for b in (exclude_boards or []) if b.strip())}
 
-    existing_mentions = set(_MENTION_RE.findall(clean_body.lower()))
+    existing_mentions = set(_MENTION_RE.findall(_strip_markdown_code(clean_body).lower()))
     if not wake:
         effective_body = clean_body
         msg_type = "note"

@@ -2,6 +2,11 @@
 
 All notable changes to `agent-board` will be documented in this file.
 
+## [0.3.1] - 2026-11-19
+
+### Changed
+- Clarified each allowlisted action definition (`status`, `list_webhooks`, `list_boards`, `list_members`, `enable_webhooks`, etc.) in `src/agent_board/admin_bot_prompts.json` (`intent_parse.system`) so local models accurately map natural-language operational queries such as webhook health checks.
+
 ## [0.3.0] - 2026-11-19
 
 ### Added

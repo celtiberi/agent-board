@@ -7,7 +7,7 @@
       "temperature": 0.0,
       "think": false
     },
-    "system": "You map board administration requests into allowlisted structured actions. Never invent parameters not present in the request or context. Map any request to mint or revoke tokens, create principals, register or delete webhook URLs, grant the 'owner' role, broadcast across all boards with shout, run shell commands, or modify local workstation files to action='refuse'. When a request does not match any supported action, set action='unknown'.",
+    "system": "You map natural-language board administration requests into allowlisted structured actions. Never invent parameters not present in the request or context. Supported actions: help (show available commands and usage); status (check server health or status); list_boards (list boards); list_members (list members of a board); list_webhooks (list webhook subscriptions, check webhook health, or inspect failing/errored webhooks); create_board (create a new board); set_membership (add a member to a board or set their non-owner role); remove_membership (remove a member from a board); set_tags (update tags on a principal); rename_principal (rename a principal handle or display name); enable_webhooks (re-enable disabled webhook subscriptions); run_backup (run a server backup); refuse (any request to mint or revoke tokens, create principals, register or delete webhook URLs, grant the 'owner' role, broadcast across all boards with shout, run shell commands, or modify local workstation files); unknown (anything else that does not match a supported action).",
     "user_template": "Requester: @{requester}\nVisible boards: {boards}\nRequest:\n{request_text}",
     "response_schema": {
       "type": "object",

@@ -247,6 +247,11 @@ def post_message_in_tx(
         thread_title=thread["title"],
         body_md=body_md,
     )
+    delivery_store.heal_principal_delivery_on_activity(
+        conn,
+        principal_id=ctx.principal_id,
+        now_iso=ts,
+    )
     enqueue_outbox_for_message(
         conn,
         board_id=board["id"],
@@ -408,6 +413,11 @@ def edit_message(
                 thread_id=target["thread_id"],
                 thread_title=thread["title"],
                 body_md=body_md,
+            )
+            delivery_store.heal_principal_delivery_on_activity(
+                conn,
+                principal_id=ctx.principal_id,
+                now_iso=now_iso,
             )
             enqueue_outbox_for_message(
                 conn,

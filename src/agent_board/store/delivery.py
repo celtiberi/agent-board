@@ -198,9 +198,125 @@ def enqueue_outbox_pending(
         )
         VALUES (?, ?, ?, ?, 0, ?, 'pending', ?)
         ON CONFLICT(subscription_id, board_id) WHERE status = 'pending'
-        DO UPDATE SET latest_seq = MAX(outbox.latest_seq, excluded.latest_seq)
+        DO UPDATE SET
+            latest_seq = MAX(outbox.latest_seq, excluded.latest_seq),
+            next_attempt_at = CASE
+                WHEN excluded.latest_seq > outbox.latest_seq
+                     AND outbox.attempt > 0
+                     AND excluded.next_attempt_at < outbox.next_attempt_at
+                THEN excluded.next_attempt_at
+                ELSE outbox.next_attempt_at
+            END
         """,
         (outbox_id, subscription_id, board_id, latest_seq, next_attempt_at, created_at),
+    )
+
+
+def heal_subscription_delivery(
+    conn: sqlite3.Connection,
+    *,
+    sub_id: str,
+    now_iso: str,
+    force_enable: bool = False,
+) -> None:
+    """Reset failures, clear Auto-disabled state, suppress acked outbox rows, and expedite unread pending rows."""
+    if force_enable:
+        conn.execute(
+            """
+            UPDATE subscriptions
+            SET active = 1, failure_count = 0, disabled_reason = NULL, updated_at = ?
+            WHERE id = ?
+            """,
+            (now_iso, sub_id),
+        )
+    else:
+        conn.execute(
+            """
+            UPDATE subscriptions
+            SET active = CASE
+                    WHEN active = 0 AND disabled_reason LIKE 'Auto-disabled%' THEN 1
+                    ELSE active
+                END,
+                failure_count = 0,
+                disabled_reason = CASE
+                    WHEN active = 0 AND disabled_reason LIKE 'Auto-disabled%' THEN NULL
+                    ELSE disabled_reason
+                END,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (now_iso, sub_id),
+        )
+
+    conn.execute(
+        """
+        UPDATE outbox
+        SET status = 'suppressed', locked_at = NULL, last_error = 'already_acked'
+        WHERE subscription_id = ?
+          AND status = 'pending'
+          AND latest_seq <= COALESCE(
+              (SELECT c.read_seq FROM cursors c
+               JOIN subscriptions s ON s.principal_id = c.principal_id
+               WHERE s.id = outbox.subscription_id AND c.board_id = outbox.board_id),
+              0
+          )
+        """,
+        (sub_id,),
+    )
+    conn.execute(
+        """
+        UPDATE outbox
+        SET attempt = 0, next_attempt_at = ?
+        WHERE subscription_id = ?
+          AND status = 'pending'
+          AND (attempt > 0 OR next_attempt_at > ?)
+        """,
+        (now_iso, sub_id, now_iso),
+    )
+
+
+def heal_principal_delivery_on_activity(
+    conn: sqlite3.Connection,
+    *,
+    principal_id: str,
+    now_iso: str,
+    board_id: str | None = None,
+    acked_seq: int | None = None,
+) -> None:
+    """Suppress acked pending outbox rows and reset transient webhook failure state on agent activity."""
+    if principal_id == "00000000000000000000000000":
+        return
+
+    if board_id is not None and acked_seq is not None:
+        conn.execute(
+            """
+            UPDATE outbox
+            SET status = 'suppressed', locked_at = NULL, last_error = 'already_acked'
+            WHERE board_id = ?
+              AND status = 'pending'
+              AND latest_seq <= ?
+              AND subscription_id IN (SELECT id FROM subscriptions WHERE principal_id = ?)
+            """,
+            (board_id, acked_seq, principal_id),
+        )
+
+    conn.execute(
+        """
+        UPDATE subscriptions
+        SET active = CASE
+                WHEN active = 0 AND disabled_reason LIKE 'Auto-disabled%' THEN 1
+                ELSE active
+            END,
+            failure_count = 0,
+            disabled_reason = CASE
+                WHEN active = 0 AND disabled_reason LIKE 'Auto-disabled%' THEN NULL
+                ELSE disabled_reason
+            END,
+            updated_at = ?
+        WHERE principal_id = ?
+          AND (failure_count > 0 OR (active = 0 AND disabled_reason LIKE 'Auto-disabled%'))
+        """,
+        (now_iso, principal_id),
     )
 
 

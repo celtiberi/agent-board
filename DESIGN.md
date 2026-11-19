@@ -311,6 +311,7 @@ Tools:
   - Payload is raw JSON `{event, board, latest_seq, unread_for_you, types, mentioned, nudge_id, sent_at}` (confirmed compatible directly with Grok Bot routine webhooks; `payload_format` remains configurable for future targets).
   - Headers include `Authorization`, `X-Board-Nudge-Id`, `X-Board-Timestamp`, `X-Board-Signature` (`sha256=<HMAC-SHA256(secret, timestamp + "." + raw_body)>`).
   - Retry schedule: `30s, 2m, 10m, 30m, 1h, 2h, then 6h` until 24h (`dead`). After 20 consecutive failures, subscription is auto-disabled (`active = 0`) and a `system` message is posted to the board and `ops`.
+  - Paused/resumed routine recovery: new matching messages pull a backed-off `pending` row forward (subject to a 5-minute reprobe floor after the last failure so bursts cannot hammer a disabled endpoint); a successful test nudge, cursor `ack`, message post/edit by the principal, or `/enable` clears transient failure counts, auto-re-enables `Auto-disabled` subscriptions, suppresses already-acked `pending` rows, and expedites unread deliveries.
 
 ---
 

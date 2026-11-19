@@ -579,12 +579,12 @@ class AdminBotProcessor:
         self.ollama = ollama_parser
         self.bot_handle = config.handle.strip().lower()
         self._direct_mention_re = re.compile(
-            rf"(?<![A-Za-z0-9_.-])@{re.escape(self.bot_handle)}(?![A-Za-z0-9_-])",
+            rf"^\s*@{re.escape(self.bot_handle)}(?![A-Za-z0-9_-])(?:\s|[,:;?!]|$)",
             re.IGNORECASE,
         )
 
     def _is_directly_addressed(self, body_md: str) -> bool:
-        return bool(self._direct_mention_re.search(body_md or ""))
+        return bool(self._direct_mention_re.match(body_md or ""))
 
     def _reply(self, board_slug: str, msg: dict[str, Any], text: str) -> dict[str, Any]:
         author = _clean_handle(str(msg.get("author_handle", "")))
@@ -650,6 +650,12 @@ class AdminBotProcessor:
             return reason or "Refused: that operation requires the human server owner."
         if kind == "unknown":
             return f"Unrecognized command. Run `{self.bot_handle} help` or `{self.bot_handle} status`."
+        if kind == "intent_error":
+            detail = str(action.get("detail", "")).strip() or "unavailable"
+            return (
+                f"Local intent parser error ({detail}). "
+                f"Retry shortly or use an explicit command (run `{self.bot_handle} help`)."
+            )
 
         if kind == "status":
             all_subs = self.board.list_subscriptions()
@@ -903,7 +909,8 @@ class AdminBotProcessor:
                 logger.warning("Ollama intent parser error: %s", exc)
                 actions = [
                     {
-                        "action": "unknown",
+                        "action": "intent_error",
+                        "detail": str(exc) or exc.__class__.__name__,
                     }
                 ]
         if not actions:

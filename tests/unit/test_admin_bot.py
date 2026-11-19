@@ -371,3 +371,73 @@ def test_admin_bot_ollama_fallback_and_webhook_server(env, tmp_path: Path) -> No
         server.shutdown()
         server.server_close()
         ollama.close()
+
+
+def test_admin_bot_ignores_incidental_and_code_quoted_mentions(env, tmp_path: Path) -> None:
+    _, cfg, _, bot_client, _ = _setup_bot(env, tmp_path)
+
+    non_command_bodies = [
+        "FYI: former `@admin` -> `@tool-master`. Mention `@board-admin`.",
+        "FYI: for board tasks, mention @board-admin.",
+        "@bob please ask @board-admin for help",
+        "> @board-admin status",
+        "```\n@board-admin status\n```",
+        "`@board-admin` status",
+    ]
+    for idx, body in enumerate(non_command_bodies):
+        messages_svc.post_message(
+            env.services,
+            env.owner_ctx,
+            board_slug="alpha",
+            msg_type="note" if idx == 0 else "question",
+            body_md=body,
+        )
+
+    messages_svc.post_message(
+        env.services,
+        env.owner_ctx,
+        board_slug="alpha",
+        msg_type="question",
+        body_md="@board-admin status",
+    )
+    messages_svc.post_message(
+        env.services,
+        env.owner_ctx,
+        board_slug="alpha",
+        msg_type="question",
+        body_md="@board-admin, list boards",
+    )
+
+    assert run_once(cfg, board_client=bot_client) == 2
+    msgs = bot_client.read_messages("alpha", since_seq=0)["messages"]
+    bot_replies = [m["body_md"] for m in msgs if m["author_handle"] == "board-admin"]
+    assert len(bot_replies) == 2
+    assert any("**Server Status**" in r for r in bot_replies)
+    assert any("**Boards**" in r for r in bot_replies)
+
+
+def test_admin_bot_reports_ollama_errors_distinctly(env, tmp_path: Path) -> None:
+    def _timeout_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/tags":
+            return httpx.Response(200, json={"models": [{"name": "gemma4:12b"}]})
+        raise httpx.ReadTimeout("timed out", request=request)
+
+    ollama = OllamaIntentParser("http://ollama.test", "gemma4:12b", transport=httpx.MockTransport(_timeout_handler))
+    try:
+        _, cfg, _, bot_client, _ = _setup_bot(env, tmp_path, ollama=ollama)
+        messages_svc.post_message(
+            env.services,
+            env.owner_ctx,
+            board_slug="alpha",
+            msg_type="question",
+            body_md="@board-admin please check webhook health",
+        )
+        assert run_once(cfg, board_client=bot_client, ollama_parser=ollama) == 1
+        msgs = bot_client.read_messages("alpha", since_seq=0)["messages"]
+        bot_replies = [m["body_md"] for m in msgs if m["author_handle"] == "board-admin"]
+        assert len(bot_replies) == 1
+        assert "Local intent parser error" in bot_replies[0]
+        assert "timed out" in bot_replies[0]
+        assert "Unrecognized command" not in bot_replies[0]
+    finally:
+        ollama.close()

@@ -199,3 +199,32 @@ def test_schema_validation_and_secret_warnings(env: BoardTestEnv) -> None:
     assert flagged["warnings"] == ["secret redacted"]
     assert "ABCDEFGHIJKLMNOPQRSTUVWXYZ123456" not in flagged["body_md"]
     assert "[REDACTED]" in flagged["body_md"]
+
+
+def test_mentions_ignore_inline_and_fenced_code_spans(env: BoardTestEnv) -> None:
+    inline_only = messages_svc.post_message(
+        env.services,
+        env.owner_ctx,
+        board_slug="alpha",
+        msg_type="note",
+        body_md="FYI: mention `@bob` in docs when handing off QA.",
+    )
+    assert inline_only["mentions"] == []
+
+    fenced_only = messages_svc.post_message(
+        env.services,
+        env.owner_ctx,
+        board_slug="alpha",
+        msg_type="note",
+        body_md="Example snippet:\n```\n@bob status\n```",
+    )
+    assert fenced_only["mentions"] == []
+
+    real_mention = messages_svc.post_message(
+        env.services,
+        env.owner_ctx,
+        board_slug="alpha",
+        msg_type="note",
+        body_md="Example `@all` ignored, real mention @bob kept.",
+    )
+    assert real_mention["mentions"] == ["bob"]

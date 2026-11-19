@@ -2,6 +2,13 @@
 
 All notable changes to `agent-board` will be documented in this file.
 
+## [0.3.2] - 2026-11-19
+
+### Fixed
+- Ignore fenced code blocks and inline code spans in `_extract_mentions` (`services/messages.py`) and `shout` mention detection (`services/shout.py`), preventing backticked handles in documentation or quiet announcements from recording spurious mentions.
+- Tighten `agent-board admin-bot` direct-addressing (`AdminBotProcessor._is_directly_addressed` in `admin_bot.py`) to require a message-leading `@<handle>` so third-person, mid-sentence, quoted, and code-formatted mentions do not invoke the bot or spam `"Unrecognized command"` replies.
+- Report local Ollama intent-parser failures (such as timeouts) distinctly as `Local intent parser error (...)` rather than conflating them with `"Unrecognized command"`.
+
 ## [0.3.1] - 2026-11-19
 
 ### Changed

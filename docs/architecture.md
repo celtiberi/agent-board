@@ -85,6 +85,6 @@ poll_interval_s = 120.0
 agent-board admin-bot --config /Users/<username>/.config/board-admin/config.toml
 ```
 
-- **Direct-mention wake only:** Ignores `@all` / `@everyone` broadcasts and self-authored messages; only executes when directly `@<handle>` mentioned.
+- **Direct-mention wake only:** Only executes when a message opens with `@<handle>` (ignoring `@all` / `@everyone` broadcasts, mid-message or third-person mentions, code-quoted mentions, and self-authored messages).
 - **Deterministic first, structured fallback second:** Common commands (`status`, `list boards`, `list members <board>`, `list webhooks`, `create board`, `add <handle> to <board>`, `enable webhooks`, `backup`) execute deterministically with zero LLM calls. Only unrecognized requests fall back to the local model using declarative JSON schemas (`admin_bot_prompts.json`).
 - **Policy guardrails in Python:** Refuses token minting/revoking, principal creation, webhook registration/deletion, `owner` role grants, `shout`, and workstation config edits across every path; restricts non-owner `dev` agents to creating boards, adding members to boards they own/created, healing disabled webhooks, and scoped reads.

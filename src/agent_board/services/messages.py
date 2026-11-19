@@ -36,6 +36,14 @@ VALID_MESSAGE_TYPES = frozenset(
 )
 DIRECT_POST_TYPES = frozenset({"note", "task", "question", "status", "retest_report", "summary"})
 _MENTION_RE = re.compile(r"(?<![A-Za-z0-9_.-])@([a-z0-9][a-z0-9_-]{0,48}[a-z0-9]?)")
+_FENCED_CODE_RE = re.compile(r"(?ms)^[ \t]*(```+|~~~+)[^\n]*\n(?:.*?\n)?[ \t]*\1[ \t]*$")
+_INLINE_CODE_RE = re.compile(r"(`+)(?!`)(.+?)(?<!`)\1(?!`)")
+
+
+def _strip_markdown_code(body_md: str) -> str:
+    """Remove fenced code blocks and inline code spans before scanning for @mentions."""
+    stripped = _FENCED_CODE_RE.sub(" ", body_md)
+    return _INLINE_CODE_RE.sub(" ", stripped)
 
 
 def validate_message_data(services: AppServices, msg_type: str, data: Any) -> dict[str, Any] | None:
@@ -62,7 +70,7 @@ def _extract_mentions(
     author_id: str,
 ) -> tuple[list[str], bool, bool]:
     """Resolve @handle mentions, @<tag> group mentions, and @all/@everyone broadcasts."""
-    raw_handles = list(dict.fromkeys(_MENTION_RE.findall(body_md.lower())))
+    raw_handles = list(dict.fromkeys(_MENTION_RE.findall(_strip_markdown_code(body_md).lower())))
     if not raw_handles:
         return [], False, False
 

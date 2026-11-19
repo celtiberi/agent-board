@@ -98,7 +98,16 @@ def record_decision(
         raise ValidationError(str(exc)) from exc
 
     clean_tags = [t.strip().lower() for t in (tags or []) if t.strip()]
-    clean_rationale = rationale.strip() if rationale and rationale.strip() else None
+    raw_rationale = rationale.strip() if rationale and rationale.strip() else None
+
+    clean_title, title_changed = services.redactor.scrub_text(clean_title)
+    clean_statement, stmt_changed = services.redactor.scrub_text(clean_statement)
+    clean_thread, thread_changed = services.redactor.scrub_text(thread_title or "decisions")
+    clean_rationale: str | None = None
+    rat_changed = False
+    if raw_rationale is not None:
+        clean_rationale, rat_changed = services.redactor.scrub_text(raw_rationale)
+    pre_redacted = title_changed or stmt_changed or thread_changed or rat_changed
 
     with services.db.write_tx() as conn:
         board, eff_role = require_board_role(conn, ctx, board_slug, "agent")
@@ -119,10 +128,11 @@ def record_decision(
                 services=services,
                 ctx=ctx,
                 board=board,
-                thread_title=thread_title or "decisions",
+                thread_title=clean_thread or "decisions",
                 msg_type="decision",
                 body_md="\n".join(body_parts),
                 data={"decision_id": ref, "action": "recorded"},
+                pre_redacted=pre_redacted,
                 now_iso=now_iso,
             )
             dec_rowid = decisions_store.insert_decision(
@@ -182,7 +192,7 @@ def record_decision(
                 "decided_on": clean_date,
                 "rationale": clean_rationale,
                 "tags": clean_tags,
-                "thread_title": thread_title,
+                "thread_title": clean_thread,
             },
             status_code=201,
             fn=_do,
@@ -218,7 +228,17 @@ def supersede_decision(
         raise ValidationError(str(exc)) from exc
 
     clean_tags = [t.strip().lower() for t in (tags or []) if t.strip()]
-    clean_rationale = rationale.strip() if rationale and rationale.strip() else None
+    raw_rationale = rationale.strip() if rationale and rationale.strip() else None
+
+    clean_title, title_changed = services.redactor.scrub_text(clean_title)
+    clean_statement, stmt_changed = services.redactor.scrub_text(clean_statement)
+    clean_reason, reason_changed = services.redactor.scrub_text(clean_reason)
+    clean_thread, thread_changed = services.redactor.scrub_text(thread_title or "decisions")
+    clean_rationale: str | None = None
+    rat_changed = False
+    if raw_rationale is not None:
+        clean_rationale, rat_changed = services.redactor.scrub_text(raw_rationale)
+    pre_redacted = title_changed or stmt_changed or reason_changed or thread_changed or rat_changed
 
     with services.db.write_tx() as conn:
         board, eff_role = require_board_role(conn, ctx, board_slug, "agent")
@@ -256,7 +276,7 @@ def supersede_decision(
                 services=services,
                 ctx=ctx,
                 board=board,
-                thread_title=thread_title or "decisions",
+                thread_title=clean_thread or "decisions",
                 msg_type="decision",
                 body_md="\n".join(body_parts),
                 data={
@@ -266,6 +286,7 @@ def supersede_decision(
                     "superseded_by": new_label,
                     "reason": clean_reason,
                 },
+                pre_redacted=pre_redacted,
                 now_iso=now_iso,
             )
             new_rowid = decisions_store.insert_decision(
@@ -366,6 +387,7 @@ def revoke_decision(
     clean_reason = reason.strip()
     if not clean_reason:
         raise ValidationError("Revocation reason is required")
+    clean_reason, reason_changed = services.redactor.scrub_text(clean_reason)
 
     with services.db.write_tx() as conn:
         board, _ = require_board_role(conn, ctx, board_slug, "owner")
@@ -391,6 +413,7 @@ def revoke_decision(
                 msg_type="decision",
                 body_md=f"**{label} revoked:** {row['title']}\n\n_Reason:_ {clean_reason}",
                 data={"decision_id": label, "action": "revoked", "reason": clean_reason},
+                pre_redacted=reason_changed,
                 now_iso=now_iso,
             )
             new_version = int(row["version"]) + 1

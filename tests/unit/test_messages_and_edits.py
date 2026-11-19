@@ -88,7 +88,10 @@ def test_redaction_scrubs_entire_root_chain_and_fts(env: BoardTestEnv) -> None:
         body_md="Leaked key sk-proj-ABCDEFGHIJKLMNOPQRSTUVWXYZ123456",
         thread_title="general",
     )
-    assert m1["warnings"] == ["possible secret detected"]
+    assert m1["warnings"] == ["secret redacted"]
+    assert "sk-proj-" not in m1["body_md"]
+    assert "[REDACTED]" in m1["body_md"]
+    assert search_svc.search(env.services, env.owner_ctx, query="ABCDEFGHIJKLMNOPQRSTUVWXYZ123456")["total"] == 0
 
     m2 = messages_svc.edit_message(
         env.services,
@@ -193,4 +196,6 @@ def test_schema_validation_and_secret_warnings(env: BoardTestEnv) -> None:
         msg_type="note",
         body_md="Oops token=ABCDEFGHIJKLMNOPQRSTUVWXYZ123456",
     )
-    assert flagged["warnings"] == ["possible secret detected"]
+    assert flagged["warnings"] == ["secret redacted"]
+    assert "ABCDEFGHIJKLMNOPQRSTUVWXYZ123456" not in flagged["body_md"]
+    assert "[REDACTED]" in flagged["body_md"]

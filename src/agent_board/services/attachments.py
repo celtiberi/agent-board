@@ -37,6 +37,18 @@ ALLOWED_CONTENT_TYPES: frozenset[str] = frozenset(
     }
 )
 
+_TEXT_ATTACHMENT_TYPES: frozenset[str] = frozenset(
+    {
+        "text/plain",
+        "text/markdown",
+        "text/x-markdown",
+        "text/csv",
+        "application/csv",
+        "application/json",
+        "text/x-log",
+    }
+)
+
 _FILENAME_SAFE_RE = re.compile(r"[^A-Za-z0-9._-]+")
 
 
@@ -93,6 +105,13 @@ def upload_attachment(
             f"Attachment size {size} exceeds limit of {max_bytes} bytes",
             code="attachment_too_large",
         )
+
+    if clean_ct in _TEXT_ATTACHMENT_TYPES:
+        decoded = content_bytes.decode("utf-8", errors="replace")
+        scrubbed_text, secret_redacted = services.redactor.scrub_text(decoded)
+        if secret_redacted:
+            content_bytes = scrubbed_text.encode("utf-8")
+            size = len(content_bytes)
 
     sha256_hex = hashlib.sha256(content_bytes).hexdigest()
     target_path = blob_path(services, sha256_hex)

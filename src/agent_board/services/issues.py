@@ -111,6 +111,9 @@ def open_issue(
     clean_body = body_md.strip()
     if not clean_title or not clean_body:
         raise ValidationError("title and body_md are required")
+    clean_title, title_changed = services.redactor.scrub_text(clean_title)
+    clean_body, body_changed = services.redactor.scrub_text(clean_body)
+    pre_redacted = title_changed or body_changed
     norm_severity = severity.strip().lower()
     clean_severity = SEVERITY_ALIASES.get(norm_severity, norm_severity)
     if clean_severity not in VALID_SEVERITIES:
@@ -155,6 +158,7 @@ def open_issue(
                 msg_type="issue",
                 body_md=f"**Opened {ref} [{clean_severity}]: {clean_title}**{assignee_note}\n\n{clean_body}",
                 data={"issue_id": ref, "action": "opened"},
+                pre_redacted=pre_redacted,
                 now_iso=now_iso,
             )
             issue_rowid = issues_store.insert_issue(
@@ -236,6 +240,11 @@ def update_issue(
     if status is None and assignee is None and (comment is None or not comment.strip()):
         raise ValidationError("Provide at least one of status, assignee, or comment")
 
+    clean_comment: str | None = None
+    comment_changed = False
+    if comment is not None and comment.strip():
+        clean_comment, comment_changed = services.redactor.scrub_text(comment.strip())
+
     with services.db.write_tx() as conn:
         board, _ = require_board_role(conn, ctx, board_slug, "agent")
         ref_kind, ref_val = parse_issue_ref(ref)
@@ -286,8 +295,8 @@ def update_issue(
                     action = "assigned"
                 target_txt = f"@{new_assignee_handle}" if new_assignee_handle else "unassigned"
                 parts.append(f"Assignee: {target_txt}")
-            if comment and comment.strip():
-                parts.append(comment.strip())
+            if clean_comment:
+                parts.append(clean_comment)
 
             msg = post_message_in_tx(
                 conn,
@@ -298,6 +307,7 @@ def update_issue(
                 msg_type="issue",
                 body_md="\n\n".join(parts),
                 data={"issue_id": label, "action": action},
+                pre_redacted=comment_changed,
                 now_iso=now_iso,
             )
             issues_store.update_issue_fields(
@@ -333,14 +343,14 @@ def update_issue(
                     message_id=msg["id"],
                     at=now_iso,
                 )
-            if comment and comment.strip() and not status_changed and not assignee_changed:
+            if clean_comment and not status_changed and not assignee_changed:
                 issues_store.insert_issue_event(
                     conn,
                     event_id=new_ulid(),
                     issue_id=issue["id"],
                     action="commented",
                     from_val=None,
-                    to_val=comment.strip()[:200],
+                    to_val=clean_comment[:200],
                     actor_id=ctx.principal_id,
                     message_id=msg["id"],
                     at=now_iso,
@@ -363,7 +373,7 @@ def update_issue(
             ctx=ctx,
             key=idempotency_key,
             operation=f"issue.update:{board['slug']}:{issue['id']}",
-            request_payload={"status": status, "assignee": assignee, "comment": comment},
+            request_payload={"status": status, "assignee": assignee, "comment": clean_comment},
             status_code=200,
             fn=_do,
         )
@@ -388,6 +398,7 @@ def close_issue(
             "resolution must be at least 20 characters explaining the structural cause and fix",
             code="resolution_too_short",
         )
+    clean_res, res_changed = services.redactor.scrub_text(clean_res)
 
     with services.db.write_tx() as conn:
         board, _ = require_board_role(conn, ctx, board_slug, "agent")
@@ -410,6 +421,7 @@ def close_issue(
                 msg_type="issue",
                 body_md=f"**Closed {label} as `{status}`**\n\n_Resolution:_ {clean_res}",
                 data={"issue_id": label, "action": "resolved"},
+                pre_redacted=res_changed,
                 now_iso=now_iso,
             )
             issues_store.update_issue_fields(
@@ -479,6 +491,7 @@ def reopen_issue(
     clean_reason = reason.strip()
     if not clean_reason:
         raise ValidationError("Reopen reason is required")
+    clean_reason, reason_changed = services.redactor.scrub_text(clean_reason)
 
     with services.db.write_tx() as conn:
         board, _ = require_board_role(conn, ctx, board_slug, "agent")
@@ -501,6 +514,7 @@ def reopen_issue(
                 msg_type="issue",
                 body_md=f"**Reopened {label}** (was `{issue['status']}`)\n\n_Reason:_ {clean_reason}",
                 data={"issue_id": label, "action": "reopened"},
+                pre_redacted=reason_changed,
                 now_iso=now_iso,
             )
             issues_store.update_issue_fields(

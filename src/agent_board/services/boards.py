@@ -295,11 +295,17 @@ def create_thread(
     first_message: dict[str, Any] | None = None,
     idempotency_key: str | None = None,
 ) -> dict[str, Any]:
-    clean_title = title.strip()
-    if not clean_title:
+    raw_title = title.strip()
+    if not raw_title:
         raise ValidationError("Thread title is required")
+    clean_title, _ = services.redactor.scrub_text(raw_title)
     if len(clean_title) > 200:
         raise ValidationError("Thread title must be <= 200 characters")
+    clean_first = (
+        services.redactor.scrub_data(first_message)[0]
+        if isinstance(first_message, dict)
+        else first_message
+    )
 
     with services.db.write_tx() as conn:
         board, _ = require_board_role(conn, ctx, board_slug, "agent")
@@ -352,7 +358,7 @@ def create_thread(
             ctx=ctx,
             key=idempotency_key,
             operation=f"thread.create:{board['slug']}",
-            request_payload={"title": clean_title, "first_message": first_message},
+            request_payload={"title": clean_title, "first_message": clean_first},
             status_code=201,
             fn=_do,
         )

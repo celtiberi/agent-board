@@ -11,7 +11,6 @@ import jsonschema
 
 from agent_board.errors import ConflictError, NotFoundError, PermissionDeniedError, ValidationError
 from agent_board.ids import BROADCAST_MENTIONS, new_ulid, normalize_principal_tags, utc_now_iso
-from agent_board.secrets_scan import scan_for_secrets
 from agent_board.services.auth import record_audit, require_board_role, require_server_owner
 from agent_board.services.context import AppServices, AuthContext
 from agent_board.services.delivery import enqueue_outbox_for_message
@@ -213,6 +212,25 @@ def resolve_or_create_thread(
     return created
 
 
+def _scrub_message_fields(
+    services: AppServices,
+    *,
+    body_md: str,
+    thread_title: str | None = None,
+    data: dict[str, Any] | None = None,
+) -> tuple[str, str | None, dict[str, Any] | None, bool]:
+    clean_body, body_changed = services.redactor.scrub_text(body_md)
+    clean_title = thread_title
+    title_changed = False
+    if thread_title is not None:
+        clean_title, title_changed = services.redactor.scrub_text(thread_title)
+    clean_data = data
+    data_changed = False
+    if data is not None:
+        clean_data, data_changed = services.redactor.scrub_data(data)
+    return clean_body, clean_title, clean_data, (body_changed or title_changed or data_changed)
+
+
 def post_message_in_tx(
     conn: sqlite3.Connection,
     *,
@@ -227,6 +245,7 @@ def post_message_in_tx(
     reply_to_id: str | None = None,
     attachment_ids: list[str] | None = None,
     suppress_wake: bool = False,
+    pre_redacted: bool = False,
     now_iso: str | None = None,
 ) -> dict[str, Any]:
     if msg_type not in VALID_MESSAGE_TYPES:
@@ -237,13 +256,21 @@ def post_message_in_tx(
         raise ValidationError(f"Message body exceeds limit of {services.settings.max_message_bytes} bytes")
 
     validated_data = validate_message_data(services, msg_type, data)
+    clean_body, clean_title, clean_data, tx_redacted = _scrub_message_fields(
+        services,
+        body_md=body_md,
+        thread_title=thread_title,
+        data=validated_data,
+    )
+    redacted = pre_redacted or tx_redacted
+
     ts = now_iso or utc_now_iso()
     thread = resolve_or_create_thread(
         conn,
         board_id=board["id"],
         created_by=ctx.principal_id,
         thread_id=thread_id,
-        thread_title=thread_title,
+        thread_title=clean_title,
         now_iso=ts,
     )
 
@@ -261,10 +288,10 @@ def post_message_in_tx(
             if att["message_id"] is not None:
                 raise ConflictError(f"Attachment '{att_id}' is already attached to a message")
 
-    warnings = scan_for_secrets(body_md)
+    warnings = ["secret redacted"] if redacted else []
     mentioned_ids, is_broadcast, is_directed = _extract_mentions(
         conn,
-        body_md,
+        clean_body,
         board_id=board["id"],
         author_id=ctx.principal_id,
     )
@@ -279,8 +306,8 @@ def post_message_in_tx(
         seq=seq,
         author_id=ctx.principal_id,
         msg_type=msg_type,
-        body_md=body_md,
-        data_json=json.dumps(validated_data) if validated_data is not None else None,
+        body_md=clean_body,
+        data_json=json.dumps(clean_data) if clean_data is not None else None,
         warnings_json=json.dumps(warnings),
         reply_to_id=reply_to_id,
         supersedes_id=None,
@@ -305,7 +332,7 @@ def post_message_in_tx(
         board_id=board["id"],
         thread_id=thread["id"],
         thread_title=thread["title"],
-        body_md=body_md,
+        body_md=clean_body,
     )
     delivery_store.heal_principal_delivery_on_activity(
         conn,
@@ -347,6 +374,14 @@ def post_message(
     if msg_type not in DIRECT_POST_TYPES:
         raise ValidationError(f"Type '{msg_type}' cannot be posted directly; use record_decision or issue tools")
 
+    clean_body, clean_title, clean_data, pre_redacted = _scrub_message_fields(
+        services,
+        body_md=body_md,
+        thread_title=thread_title,
+        data=data if isinstance(data, dict) else None,
+    )
+    payload_data = clean_data if isinstance(data, dict) else data
+
     with services.db.write_tx() as conn:
         board, _ = require_board_role(conn, ctx, board_slug, "agent")
 
@@ -357,12 +392,13 @@ def post_message(
                 ctx=ctx,
                 board=board,
                 msg_type=msg_type,
-                body_md=body_md,
+                body_md=clean_body,
                 thread_id=thread_id,
-                thread_title=thread_title,
-                data=data,
+                thread_title=clean_title,
+                data=payload_data,
                 reply_to_id=reply_to_id,
                 attachment_ids=attachment_ids,
+                pre_redacted=pre_redacted,
             )
             record_audit(
                 conn,
@@ -382,10 +418,10 @@ def post_message(
             operation=f"message.post:{board['slug']}",
             request_payload={
                 "thread_id": thread_id,
-                "thread_title": thread_title,
+                "thread_title": clean_title,
                 "type": msg_type,
-                "body_md": body_md,
-                "data": data,
+                "body_md": clean_body,
+                "data": payload_data,
                 "reply_to_id": reply_to_id,
                 "attachment_ids": attachment_ids,
             },
@@ -436,17 +472,23 @@ def edit_message(
                 code="already_superseded",
             )
 
+        raw_validated_data = (
+            validate_message_data(services, target["type"], data)
+            if data is not None
+            else (json.loads(target["data"]) if target["data"] is not None else None)
+        )
+        clean_body, _, clean_data, redacted = _scrub_message_fields(
+            services,
+            body_md=body_md,
+            data=raw_validated_data,
+        )
+
         def _do() -> dict[str, Any]:
-            validated_data = (
-                validate_message_data(services, target["type"], data)
-                if data is not None
-                else (json.loads(target["data"]) if target["data"] is not None else None)
-            )
             now_iso = utc_now_iso()
-            warnings = scan_for_secrets(body_md)
+            warnings = ["secret redacted"] if redacted else []
             mentioned_ids, is_broadcast, is_directed = _extract_mentions(
                 conn,
-                body_md,
+                clean_body,
                 board_id=board["id"],
                 author_id=ctx.principal_id,
             )
@@ -461,8 +503,8 @@ def edit_message(
                 seq=seq,
                 author_id=ctx.principal_id,
                 msg_type=target["type"],
-                body_md=body_md,
-                data_json=json.dumps(validated_data) if validated_data is not None else None,
+                body_md=clean_body,
+                data_json=json.dumps(clean_data) if clean_data is not None else None,
                 warnings_json=json.dumps(warnings),
                 reply_to_id=target["reply_to_id"],
                 supersedes_id=target["id"],
@@ -479,7 +521,7 @@ def edit_message(
                 board_id=board["id"],
                 thread_id=target["thread_id"],
                 thread_title=thread["title"],
-                body_md=body_md,
+                body_md=clean_body,
             )
             delivery_store.heal_principal_delivery_on_activity(
                 conn,
@@ -516,7 +558,7 @@ def edit_message(
             ctx=ctx,
             key=idempotency_key,
             operation=f"message.edit:{board['slug']}:{message_id}",
-            request_payload={"body_md": body_md, "data": data},
+            request_payload={"body_md": clean_body, "data": clean_data},
             status_code=200,
             fn=_do,
         )
@@ -531,7 +573,7 @@ def redact_message(
     message_id: str,
     reason: str,
 ) -> dict[str, Any]:
-    clean_reason = reason.strip()
+    clean_reason, _ = services.redactor.scrub_text(reason.strip())
     if not clean_reason:
         raise ValidationError("Redaction reason is required")
 

@@ -24,6 +24,7 @@ from agent_board.http.models import (
     ShoutRequest,
     SupersedeDecisionRequest,
     UpdateIssueRequest,
+    UpdatePrincipalRequest,
 )
 from agent_board.services import auth as auth_svc
 from agent_board.services import decisions as decisions_svc
@@ -357,6 +358,22 @@ def admin_set_principal_tags(
     services: AppServices = Depends(get_services),
 ) -> dict[str, Any]:
     return auth_svc.set_principal_tags(services, ctx, handle=handle, tags=body.tags)
+
+
+@router.patch("/admin/principals/{handle}")
+def admin_rename_principal(
+    handle: str,
+    body: UpdatePrincipalRequest,
+    ctx: AuthContext = Depends(require_api_write),
+    services: AppServices = Depends(get_services),
+) -> dict[str, Any]:
+    return auth_svc.rename_principal(
+        services,
+        ctx,
+        handle=handle,
+        new_handle=body.new_handle,
+        display_name=body.display_name,
+    )
 
 
 @router.post("/admin/shout")

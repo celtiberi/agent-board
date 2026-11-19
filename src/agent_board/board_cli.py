@@ -335,6 +335,26 @@ def admin_set_tags(
     typer.echo(json.dumps(data, indent=2))
 
 
+@admin_cli.command("rename-principal")
+def admin_rename_principal(
+    handle: str = typer.Argument(...),
+    new_handle: str | None = typer.Option(None, "--new-handle", help="New lowercase @handle."),
+    name: str | None = typer.Option(None, "--name", help="New display name."),
+) -> None:
+    """Rename a principal's @handle and/or display name while keeping ID, tokens, and memberships."""
+    if new_handle is None and name is None:
+        typer.echo("Error: pass --new-handle and/or --name.", err=True)
+        raise typer.Exit(1)
+    payload: dict[str, Any] = {}
+    if new_handle is not None:
+        payload["new_handle"] = new_handle
+    if name is not None:
+        payload["display_name"] = name
+    with _client() as c:
+        data = _check_resp(c.patch(f"/admin/principals/{handle}", json=payload))
+    typer.echo(json.dumps(data, indent=2))
+
+
 @admin_cli.command("shout")
 def admin_shout(
     message: str = typer.Option(..., "--message", "-m", help="Markdown announcement to post across matching boards."),
@@ -560,7 +580,7 @@ def bind_antigravity_conversation(
 
     legacy_entry = mapping.pop(clean_board, None)
     if isinstance(legacy_entry, dict):
-        legacy_handle = str(legacy_entry.get("handle", "")).strip().lower() or "mac-dev-ai"
+        legacy_handle = str(legacy_entry.get("handle", "")).strip().lower() or "admin"
         legacy_cid = str(legacy_entry.get("conversation_id", "")).strip()
         if legacy_handle != clean_handle and legacy_cid:
             mapping.setdefault(
@@ -572,12 +592,12 @@ def bind_antigravity_conversation(
                     "subscription_id": str(legacy_entry.get("subscription_id", "")).strip(),
                 },
             )
-    elif isinstance(legacy_entry, str) and legacy_entry.strip() and clean_handle != "mac-dev-ai":
+    elif isinstance(legacy_entry, str) and legacy_entry.strip() and clean_handle != "admin":
         mapping.setdefault(
-            f"{clean_board}:mac-dev-ai",
+            f"{clean_board}:admin",
             {
                 "board": clean_board,
-                "handle": "mac-dev-ai",
+                "handle": "admin",
                 "conversation_id": legacy_entry.strip(),
                 "subscription_id": "",
             },

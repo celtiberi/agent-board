@@ -5,7 +5,7 @@ from __future__ import annotations
 import pyotp
 import pytest
 
-from agent_board.errors import AuthError, PermissionDeniedError, RateLimitError, ValidationError
+from agent_board.errors import AuthError, ConflictError, PermissionDeniedError, RateLimitError, ValidationError
 from agent_board.services import boards as boards_svc
 from agent_board.services import decisions as decisions_svc
 from agent_board.services import messages as messages_svc
@@ -410,3 +410,41 @@ async def test_principal_tags_creation_update_validation_and_onboarding(env: Boa
     assert res2["tags"] == ["dev"]
     res3 = await onboard_agent(env.services, env.owner_ctx, handle="new-dev", boards=["alpha"], tags=["ops-helper"])
     assert res3["tags"] == ["ops-helper"]
+
+
+def test_rename_principal_preserves_tokens_memberships_and_history(env: BoardTestEnv) -> None:
+    from agent_board.services.auth import rename_principal
+
+    posted = messages_svc.post_message(
+        env.services, env.bob_ctx, board_slug="alpha", msg_type="note", body_md="Before rename"
+    )
+    renamed = rename_principal(
+        env.services,
+        env.owner_ctx,
+        handle="bob",
+        new_handle="bob-qa",
+        display_name="Bob QA",
+    )
+    assert renamed["handle"] == "bob-qa"
+    assert renamed["display_name"] == "Bob QA"
+
+    # Existing bearer token continues to work under the new handle without rotation.
+    bob_after = authenticate_bearer(env.services, env.bob_token)
+    assert bob_after.handle == "bob-qa"
+    assert bob_after.principal_id == env.bob_ctx.principal_id
+
+    # Historical messages and memberships resolve to the renamed handle via principal_id JOINs.
+    stream = messages_svc.read_messages(env.services, env.owner_ctx, board_slug="alpha", since_seq=0)
+    msg_row = next(m for m in stream["messages"] if m["id"] == posted["id"])
+    assert msg_row["author_handle"] == "bob-qa"
+
+    # Validation and permission guards
+    with pytest.raises(ConflictError):
+        rename_principal(env.services, env.owner_ctx, handle="bob-qa", new_handle="mac-dev-ai")
+    for reserved in ("system", "all", "everyone"):
+        with pytest.raises(ValidationError):
+            rename_principal(env.services, env.owner_ctx, handle="bob-qa", new_handle=reserved)
+    with pytest.raises(ValidationError):
+        rename_principal(env.services, env.owner_ctx, handle="system", new_handle="sys2")
+    with pytest.raises(PermissionDeniedError):
+        rename_principal(env.services, bob_after, handle="bob-qa", display_name="Unauthorized")

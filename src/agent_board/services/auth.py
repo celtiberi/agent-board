@@ -513,6 +513,54 @@ def set_principal_tags(
         return _principal_to_dict(updated)
 
 
+def rename_principal(
+    services: AppServices,
+    ctx: AuthContext,
+    *,
+    handle: str,
+    new_handle: str | None = None,
+    display_name: str | None = None,
+) -> dict[str, Any]:
+    """Rename a principal's @handle and/or display_name while preserving ID, tokens, and history."""
+    require_server_owner(ctx)
+    old_handle = handle.strip().lower()
+    if not old_handle or old_handle == "system":
+        raise ValidationError("Cannot modify system principal")
+    if new_handle is None and display_name is None:
+        raise ValidationError("Provide new_handle or display_name")
+
+    target_handle = new_handle.strip().lower() if new_handle is not None else old_handle
+    if not is_valid_handle(target_handle) or target_handle in RESERVED_HANDLES:
+        raise ValidationError(f"Invalid handle '{new_handle}'")
+    if display_name is not None and not display_name.strip():
+        raise ValidationError("display_name must not be empty")
+
+    with services.db.write_tx() as conn:
+        row = principals_store.get_principal_by_handle(conn, old_handle)
+        if row is None:
+            raise NotFoundError(f"Principal '{old_handle}' not found")
+        if target_handle != old_handle and principals_store.get_principal_by_handle(conn, target_handle) is not None:
+            raise ConflictError(f"Principal '{target_handle}' already exists", code="duplicate_handle")
+        target_display = display_name.strip() if display_name is not None else str(row["display_name"])
+        principals_store.update_principal_identity(
+            conn,
+            row["id"],
+            handle=target_handle,
+            display_name=target_display,
+        )
+        record_audit(
+            conn,
+            ctx=ctx,
+            action="principal.rename",
+            ok=True,
+            target=target_handle,
+            detail={"old_handle": old_handle, "new_handle": target_handle, "display_name": target_display},
+        )
+        updated = principals_store.get_principal_by_id(conn, row["id"])
+        assert updated is not None
+        return _principal_to_dict(updated)
+
+
 def list_principals(services: AppServices, ctx: AuthContext) -> list[dict[str, Any]]:
     require_server_owner(ctx)
     rows = principals_store.list_principals(services.db.read_conn())

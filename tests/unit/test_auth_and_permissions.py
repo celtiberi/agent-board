@@ -5,7 +5,7 @@ from __future__ import annotations
 import pyotp
 import pytest
 
-from agent_board.errors import AuthError, PermissionDeniedError, RateLimitError
+from agent_board.errors import AuthError, PermissionDeniedError, RateLimitError, ValidationError
 from agent_board.services import boards as boards_svc
 from agent_board.services import decisions as decisions_svc
 from agent_board.services import messages as messages_svc
@@ -279,12 +279,97 @@ def test_bind_antigravity_conversation_writes_routing_and_sub(
         )
 
     assert res["subscription_id"] == "01TESTSUB123"
+    assert res["route_key"] == "alpha:research-agent"
     assert ("POST", "/api/v1/subscriptions") in calls
     assert ("POST", "/api/v1/subscriptions/01TESTSUB123/test") in calls
 
     active_json = json.loads((cfg_dir / "active_conversations.json").read_text(encoding="utf-8"))
-    assert active_json["alpha"] == {
-        "conversation_id": "11111111-2222-3333-4444-555555555555",
+    assert active_json["alpha:research-agent"] == {
+        "board": "alpha",
         "handle": "research-agent",
+        "conversation_id": "11111111-2222-3333-4444-555555555555",
         "subscription_id": "01TESTSUB123",
     }
+
+    # Binding a second agent on the same board migrates any legacy bare board key without clobbering it,
+    # and does NOT delete the agent's subscriptions on other boards sharing the same webhook URL.
+    active_json["alpha"] = {
+        "conversation_id": "00000000-1111-2222-3333-444444444444",
+        "handle": "dev-agent",
+        "subscription_id": "01DEVSUB",
+    }
+    del active_json["alpha:research-agent"]
+    (cfg_dir / "active_conversations.json").write_text(json.dumps(active_json), encoding="utf-8")
+
+    deleted_sub_ids: list[str] = []
+    sub_seq = 0
+
+    def _multi_handler(request: httpx.Request) -> httpx.Response:
+        nonlocal sub_seq
+        if request.method == "GET" and request.url.path == "/api/v1/subscriptions":
+            return httpx.Response(
+                200,
+                json={
+                    "subscriptions": [
+                        {
+                            "id": "01BETASUB",
+                            "principal_handle": "research-agent",
+                            "boards": ["beta"],
+                            "url": "http://worker.example:8795/webhook",
+                        },
+                        {
+                            "id": "01OLDALPHASUB",
+                            "principal_handle": "research-agent",
+                            "boards": ["alpha"],
+                            "url": "http://worker.example:8795/webhook",
+                        },
+                    ]
+                },
+            )
+        if request.method == "DELETE" and request.url.path.startswith("/api/v1/subscriptions/"):
+            deleted_sub_ids.append(request.url.path.rsplit("/", 1)[-1])
+            return httpx.Response(200, json={"deleted": True})
+        if request.method == "POST" and request.url.path == "/api/v1/subscriptions":
+            sub_seq += 1
+            return httpx.Response(
+                201,
+                json={"id": f"01NEWSUB{sub_seq}", "url": "http://worker.example:8795/webhook"},
+            )
+        if request.method == "POST" and request.url.path.endswith("/test"):
+            return httpx.Response(200, json={"ok": True, "status_code": 200, "error": None})
+        return httpx.Response(404, json={"error": "not_found"})
+
+    with httpx.Client(base_url="http://test/api/v1", transport=httpx.MockTransport(_multi_handler)) as client:
+        res2 = bind_antigravity_conversation(
+            client=client,
+            handle="research-agent",
+            board_slug="alpha",
+            conversation_id="22222222-3333-4444-5555-666666666666",
+        )
+
+    assert deleted_sub_ids == ["01OLDALPHASUB"]
+    assert res2["route_key"] == "alpha:research-agent"
+    updated_active = json.loads((cfg_dir / "active_conversations.json").read_text(encoding="utf-8"))
+    assert "alpha" not in updated_active
+    assert updated_active["alpha:dev-agent"] == {
+        "board": "alpha",
+        "handle": "dev-agent",
+        "conversation_id": "00000000-1111-2222-3333-444444444444",
+        "subscription_id": "01DEVSUB",
+    }
+    assert updated_active["alpha:research-agent"] == {
+        "board": "alpha",
+        "handle": "research-agent",
+        "conversation_id": "22222222-3333-4444-5555-666666666666",
+        "subscription_id": "01NEWSUB1",
+    }
+
+
+async def test_reserved_broadcast_handles_rejected_on_creation_and_onboarding(env: BoardTestEnv) -> None:
+    from agent_board.services.onboarding import onboard_agent
+
+    for reserved in ("all", "everyone", "ALL", "system"):
+        with pytest.raises(ValidationError, match="Invalid handle"):
+            create_principal(env.services, env.owner_ctx, handle=reserved, kind="agent", display_name="Reserved")
+        with pytest.raises(ValidationError, match="Invalid handle"):
+            await onboard_agent(env.services, env.owner_ctx, handle=reserved, boards=["alpha"])

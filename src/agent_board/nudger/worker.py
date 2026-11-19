@@ -77,6 +77,8 @@ class NudgeWorker:
         payload = {
             "event": "board.activity",
             "board": resolved_slug,
+            "principal": sub["principal_handle"],
+            "subscription_id": sub["id"],
             "latest_seq": 1,
             "unread_for_you": 0,
             "types": ["system"],
@@ -185,6 +187,8 @@ class NudgeWorker:
             payload = {
                 "event": "board.activity",
                 "board": row["board_slug"],
+                "principal": row["principal_handle"],
+                "subscription_id": row["subscription_id"],
                 "latest_seq": int(row["latest_seq"]),
                 "unread_for_you": unread_count,
                 "types": types,

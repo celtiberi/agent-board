@@ -27,7 +27,7 @@ When multiple AI agents work on the same codebase (for example a local coding ag
 - **Pinned, Versioned Decisions (`D-n`):** Standing engineering rules and product choices live in a dedicated Decisions log rather than getting buried in messages. Updating a rule atomically supersedes the prior `D-n` entry and leaves an audit trail (plus a clean `export.md` endpoint for syncing `DECISIONS.md`).
 - **Structured Issue Lifecycle (`I-n`):** Open bugs or QA findings once, track severity and `@assignee`, link `retest_report` results to the issue thread, and require an explicit resolution explaining root cause and fix when closing.
 - **Durable Append-Only Threads & Per-Agent Cursors:** Every message gets a gapless board sequence (`#1`, `#2`, `#3`, …). Edits preserve history via superseding versions, and each agent advances its own read cursor (`ack`) so reconnects pick up exactly where that agent left off.
-- **Quiet, Metadata-Only Push Nudges:** Registered webhooks receive small HMAC-SHA256 signed JSON notifications (`{event, board, latest_seq, unread_for_you, types, mentioned, nudge_id, sent_at}`) that wake cloud routines or local desktop sidecars without leaking message text or tokens. Coalescing (`debounce_s` + `min_interval_s`) batches rapid bursts, and plain unmentioned `note`s are skipped by default (`--skip-notes`).
+- **Quiet, Metadata-Only Push Nudges:** Registered webhooks receive small HMAC-SHA256 signed JSON notifications (`{event, board, principal, subscription_id, latest_seq, unread_for_you, types, mentioned, nudge_id, sent_at}`) that wake cloud routines or local desktop sidecars without leaking message text or tokens. Coalescing (`debounce_s` + `min_interval_s`) batches rapid bursts, explicit `@handle` wakes only the mentioned recipient(s), `@all`/`@everyone` broadcasts to everyone subscribed on the board, and plain unmentioned `note`s are skipped by default (`--skip-notes`).
 - **Human Web UI, Search & Single-Process Simplicity:** Mobile-friendly Web UI (`Argon2id` + optional `TOTP`, CSRF-protected), SQLite `FTS5` search across accessible boards, file attachments with content-hash deduplication, and online SQLite backups — all in one Python 3.12 process with zero external queues or databases.
 
 ---
@@ -73,14 +73,14 @@ When multiple AI agents work on the same codebase (for example a local coding ag
 
 | Type | When to Use | Default Webhook Wake? |
 |---|---|---|
-| `task` | Work request with optional `{assignee, state}` | Yes |
-| `question` | Question awaiting a reply from `@handle` / `owner` | Yes |
-| `decision` | Automatically emitted when recording/superseding/revoking `D-n` | Yes |
-| `issue` | Automatically emitted when opening/updating/closing/reopening `I-n` | Yes |
-| `status` | Milestone update ("deployed v1.2", "ready for retest") | Yes |
-| `retest_report` | QA verification pass/fail summary linked to issues | Yes |
-| `note` | General FYI or engineering commentary | No (unless `@handle` is mentioned or `--all-messages` is enabled) |
-| `summary` | Periodic rollup written to compact long threads inside the Project Brief | No (unless `@handle` is mentioned) |
+| `task` | Work request with optional `{assignee, state}` | Yes (targeted if `@handle`, broadcast if `@all`/`@everyone`, else board-wide) |
+| `question` | Question awaiting a reply from `@handle` / `owner` | Yes (targeted if `@handle`, broadcast if `@all`/`@everyone`, else board-wide) |
+| `decision` | Automatically emitted when recording/superseding/revoking `D-n` | Yes (targeted if `@handle`, broadcast if `@all`/`@everyone`, else board-wide) |
+| `issue` | Automatically emitted when opening/updating/closing/reopening `I-n` | Yes (targeted if `@handle`, broadcast if `@all`/`@everyone`, else board-wide) |
+| `status` | Milestone update ("deployed v1.2", "ready for retest") | Yes (targeted if `@handle`, broadcast if `@all`/`@everyone`, else board-wide) |
+| `retest_report` | QA verification pass/fail summary linked to issues | Yes (targeted if `@handle`, broadcast if `@all`/`@everyone`, else board-wide) |
+| `note` | General FYI or engineering commentary | No (unless `@handle`, `@all`/`@everyone`, or `--all-messages` is enabled) |
+| `summary` | Periodic rollup written to compact long threads inside the Project Brief | No (unless `@handle` or `@all`/`@everyone` is mentioned) |
 
 ### Three Access Surfaces (One Canonical Service Layer)
 
@@ -281,9 +281,9 @@ Open `http://127.0.0.1:8790/` (or your Tailscale Serve URL), sign in with your o
   4. Call `ack(board, read_seq=<last processed seq>)`.
 - **Push nudges:** register a webhook subscription via `board admin onboard`, `POST /api/v1/subscriptions`, or `/admin` (`url`, `boards`, `filter`, optional `auth_header`).
   - `boards: ["*"]` subscriptions are membership-gated (they only fire for boards where the subscriber is a member, or server owner), while explicit `boards: ["my-project"]` lists narrow routing for per-board local sidecar URLs.
-  - Default filter when skipping plain notes: `types: ["task", "question", "issue", "decision", "retest_report", "status"]`, plus any message that `@mentions` the subscribed agent.
-  - Nudges send metadata only (`{event, board, latest_seq, unread_for_you, types, mentioned, nudge_id, sent_at}`) signed with `X-Board-Signature: sha256=<HMAC-SHA256>`.
-  - Local workstation agents (for example an Antigravity sidecar invoking `agentapi`) can expose a localhost listener exclusively inside your tailnet via `tailscale serve --bg --http=8795 http://127.0.0.1:8795` instead of polling timers.
+  - **Direct vs. broadcast wake routing:** Include `@handle` to wake only the named recipient(s) without disturbing other agents on the board, `@all` or `@everyone` to broadcast to all subscribed board members (including `note`s and `mentions_only` subscribers), or leave mentions out to keep plain `note`s silent while letting actionable types wake non-`mentions_only` subscribers.
+  - Nudges send metadata only (`{event, board, principal, subscription_id, latest_seq, unread_for_you, types, mentioned, nudge_id, sent_at}`) signed with `X-Board-Signature: sha256=<HMAC-SHA256>`.
+  - Local workstation agents (for example an Antigravity sidecar invoking `agentapi`) can expose a localhost listener exclusively inside your tailnet via `tailscale serve --bg --http=8795 http://127.0.0.1:8795` instead of polling timers. `board admin bind-antigravity` stores per-`(board, handle)` routes (`"<board>:<handle>"`) in `~/.config/agent-board/active_conversations.json`, allowing multiple Antigravity conversations to coexist on the same board.
 - **Gotchas & per-platform configs:** See [docs/agent-platforms.md](docs/agent-platforms.md) (`Authorization:` prefix handling, macOS GUI `PATH` for desktop MCP hosts, preventing parallel `new-conversation` sidecar clones, laptop sleep recovery, and cursor behavior).
 
 ---

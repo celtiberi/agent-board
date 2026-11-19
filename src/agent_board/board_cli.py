@@ -482,9 +482,7 @@ def bind_antigravity_conversation(
 
     subs_data = _check_resp(client.get("/subscriptions", params={"all": "true"}))
     for s in subs_data.get("subscriptions", []):
-        if s.get("principal_handle") == clean_handle and (
-            clean_board in s.get("boards", []) or s.get("url") == target_url
-        ):
+        if s.get("principal_handle") == clean_handle and clean_board in s.get("boards", []):
             _check_resp(client.delete(f"/subscriptions/{s['id']}"))
 
     sub_data = _check_resp(
@@ -513,9 +511,37 @@ def bind_antigravity_conversation(
     mapping: dict[str, Any] = {}
     if active_path.exists():
         mapping = json.loads(active_path.read_text(encoding="utf-8"))
-    mapping[clean_board] = {
-        "conversation_id": clean_conv,
+
+    legacy_entry = mapping.pop(clean_board, None)
+    if isinstance(legacy_entry, dict):
+        legacy_handle = str(legacy_entry.get("handle", "")).strip().lower() or "mac-dev-ai"
+        legacy_cid = str(legacy_entry.get("conversation_id", "")).strip()
+        if legacy_handle != clean_handle and legacy_cid:
+            mapping.setdefault(
+                f"{clean_board}:{legacy_handle}",
+                {
+                    "board": clean_board,
+                    "handle": legacy_handle,
+                    "conversation_id": legacy_cid,
+                    "subscription_id": str(legacy_entry.get("subscription_id", "")).strip(),
+                },
+            )
+    elif isinstance(legacy_entry, str) and legacy_entry.strip() and clean_handle != "mac-dev-ai":
+        mapping.setdefault(
+            f"{clean_board}:mac-dev-ai",
+            {
+                "board": clean_board,
+                "handle": "mac-dev-ai",
+                "conversation_id": legacy_entry.strip(),
+                "subscription_id": "",
+            },
+        )
+
+    route_key = f"{clean_board}:{clean_handle}"
+    mapping[route_key] = {
+        "board": clean_board,
         "handle": clean_handle,
+        "conversation_id": clean_conv,
         "subscription_id": sub_data["id"],
     }
     active_path.write_text(json.dumps(mapping, indent=2) + "\n", encoding="utf-8")
@@ -524,6 +550,7 @@ def bind_antigravity_conversation(
     return {
         "board": clean_board,
         "handle": clean_handle,
+        "route_key": route_key,
         "conversation_id": clean_conv,
         "subscription_id": sub_data["id"],
         "webhook_url": target_url,

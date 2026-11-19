@@ -365,6 +365,177 @@ def test_bind_antigravity_conversation_writes_routing_and_sub(
     }
 
 
+def test_bind_antigravity_wildcard_default_and_mentions_only_cleanup(
+    tmp_path: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import json
+    from pathlib import Path
+
+    import httpx
+
+    from agent_board.board_cli import bind_antigravity_conversation
+
+    fake_home = Path(str(tmp_path))
+    monkeypatch.setenv("HOME", str(fake_home))
+
+    cfg_dir = fake_home / ".config" / "agent-board"
+    cfg_dir.mkdir(parents=True, exist_ok=True)
+    (cfg_dir / "webhook.toml").write_text(
+        'listen_host = "127.0.0.1"\n'
+        "listen_port = 8795\n"
+        'webhook_url = "http://worker.example:8795/webhook"\n'
+        'bearer_token = "whk_test"\n'
+        'hmac_secret = "whsec_test"\n',
+        encoding="utf-8",
+    )
+
+    conv_dev = "11111111-1111-1111-1111-111111111111"
+    conv_owner = "99999999-9999-9999-9999-999999999999"
+    (cfg_dir / "active_conversations.json").write_text(
+        json.dumps(
+            {
+                "alpha": {
+                    "board": "alpha",
+                    "handle": "dev-agent",
+                    "conversation_id": conv_dev,
+                    "subscription_id": "01DEV_ALPHA",
+                },
+                "beta:dev-agent": {
+                    "board": "beta",
+                    "handle": "dev-agent",
+                    "conversation_id": conv_dev,
+                    "subscription_id": "01DEV_BETA",
+                },
+                "beta:other-agent": {
+                    "board": "beta",
+                    "handle": "other-agent",
+                    "conversation_id": "22222222-2222-2222-2222-222222222222",
+                    "subscription_id": "01OTHER_BETA",
+                },
+                "alpha:admin": {
+                    "board": "alpha",
+                    "handle": "admin",
+                    "conversation_id": conv_owner,
+                    "subscription_id": "01OWNER_ALPHA_ALL",
+                },
+                "*:admin": {
+                    "board": "*",
+                    "handle": "admin",
+                    "conversation_id": conv_owner,
+                    "subscription_id": "01OWNER_OLD_WILD",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    server_subs = [
+        {
+            "id": "01DEV_ALPHA",
+            "principal_handle": "dev-agent",
+            "boards": ["alpha"],
+            "url": "http://worker.example:8795/webhook",
+            "filter": {"exclude_self": True, "mentions_only": False},
+        },
+        {
+            "id": "01DEV_BETA",
+            "principal_handle": "dev-agent",
+            "boards": ["beta"],
+            "url": "http://worker.example:8795/webhook",
+            "filter": {"exclude_self": True, "mentions_only": False},
+        },
+        {
+            "id": "01DEV_OTHER_CONV",
+            "principal_handle": "dev-agent",
+            "boards": ["gamma"],
+            "url": "http://worker.example:8795/webhook",
+            "filter": {"exclude_self": True, "mentions_only": False},
+        },
+        {
+            "id": "01OTHER_BETA",
+            "principal_handle": "other-agent",
+            "boards": ["beta"],
+            "url": "http://worker.example:8795/webhook",
+            "filter": {"exclude_self": True, "mentions_only": False},
+        },
+        {
+            "id": "01OWNER_ALPHA_ALL",
+            "principal_handle": "admin",
+            "boards": ["alpha"],
+            "url": "http://worker.example:8795/webhook",
+            "filter": {"exclude_self": True, "mentions_only": False},
+        },
+        {
+            "id": "01OWNER_OLD_WILD",
+            "principal_handle": "admin",
+            "boards": ["alpha", "beta"],
+            "url": "http://worker.example:8795/webhook",
+            "filter": {"exclude_self": True, "mentions_only": True},
+        },
+    ]
+    deleted_ids: list[str] = []
+    created_payloads: list[dict[str, object]] = []
+    created_seq = 0
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        nonlocal created_seq
+        if request.method == "GET" and request.url.path == "/api/v1/subscriptions":
+            return httpx.Response(200, json={"subscriptions": server_subs})
+        if request.method == "DELETE" and request.url.path.startswith("/api/v1/subscriptions/"):
+            deleted_ids.append(request.url.path.rsplit("/", 1)[-1])
+            return httpx.Response(200, json={"deleted": True})
+        if request.method == "POST" and request.url.path == "/api/v1/subscriptions":
+            created_seq += 1
+            created_payloads.append(json.loads(request.content.decode("utf-8")))
+            return httpx.Response(
+                201,
+                json={"id": f"01NEWWILD{created_seq}", "url": "http://worker.example:8795/webhook"},
+            )
+        if request.method == "POST" and request.url.path.endswith("/test"):
+            return httpx.Response(200, json={"ok": True, "status_code": 200, "error": None})
+        return httpx.Response(404, json={"error": "not_found"})
+
+    with httpx.Client(base_url="http://test/api/v1", transport=httpx.MockTransport(_handler)) as client:
+        res_dev = bind_antigravity_conversation(
+            client=client,
+            handle="dev-agent",
+            conversation_id=conv_dev,
+        )
+        res_owner = bind_antigravity_conversation(
+            client=client,
+            handle="admin",
+            conversation_id=conv_owner,
+            mentions_only=True,
+        )
+
+    assert res_dev["board"] == "*"
+    assert res_dev["route_key"] == "*:dev-agent"
+    assert res_dev["mentions_only"] is False
+    assert created_payloads[0]["boards"] == ["*"]
+    assert created_payloads[0]["filter"] == {
+        "exclude_self": True,
+        "mentions_only": False,
+        "types": ["task", "question", "issue", "decision", "retest_report", "status"],
+    }
+
+    assert res_owner["board"] == "*"
+    assert res_owner["route_key"] == "*:admin"
+    assert res_owner["mentions_only"] is True
+    assert created_payloads[1]["boards"] == ["*"]
+    assert created_payloads[1]["filter"] == {"exclude_self": True, "mentions_only": True}
+
+    # Same-conv, same-filter per-board subs deleted; different filter override on alpha:admin & other agent preserved.
+    assert set(deleted_ids) == {"01DEV_ALPHA", "01DEV_BETA", "01OWNER_OLD_WILD"}
+
+    active_json = json.loads((cfg_dir / "active_conversations.json").read_text(encoding="utf-8"))
+    assert "alpha" not in active_json
+    assert "beta:dev-agent" not in active_json
+    assert active_json["*:dev-agent"]["subscription_id"] == "01NEWWILD1"
+    assert active_json["beta:other-agent"]["subscription_id"] == "01OTHER_BETA"
+    assert active_json["alpha:admin"]["subscription_id"] == "01OWNER_ALPHA_ALL"
+    assert active_json["*:admin"]["subscription_id"] == "01NEWWILD2"
+
+
 async def test_reserved_broadcast_handles_rejected_on_creation_and_onboarding(env: BoardTestEnv) -> None:
     from agent_board.services.onboarding import onboard_agent
 

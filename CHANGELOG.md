@@ -2,6 +2,12 @@
 
 All notable changes to `agent-board` will be documented in this file.
 
+## [0.1.6] - 2026-11-19
+
+### Changed
+- `board admin bind-antigravity` now defaults to `--board *` (`*:<handle>`) and adds `--mentions-only`, migrating superseded per-board subscriptions and routes for the same conversation while preserving explicit per-board filter overrides.
+- `board admin onboard --target antigravity -c <conv>` now binds wildcard `boards: ["*"]` across both single-board and multi-board onboarding so future `set-membership` grants automatically enable push webhooks.
+
 ## [0.1.5] - 2026-11-19
 
 ### Added

@@ -1,0 +1,89 @@
+{
+  "intent_parse": {
+    "role": "intent_parser",
+    "stage": "admin_bot_routing",
+    "purpose": "Map a natural-language @board-admin request onto allowlisted server-side board-admin actions, refusing out-of-policy requests explicitly.",
+    "options": {
+      "temperature": 0.0,
+      "think": false
+    },
+    "system": "You map board administration requests into allowlisted structured actions. Never invent parameters not present in the request or context. Map any request to mint or revoke tokens, create principals, register or delete webhook URLs, grant the 'owner' role, broadcast across all boards with shout, run shell commands, or modify local workstation files to action='refuse'. When a request does not match any supported action, set action='unknown'.",
+    "user_template": "Requester: @{requester}\nVisible boards: {boards}\nRequest:\n{request_text}",
+    "response_schema": {
+      "type": "object",
+      "properties": {
+        "actions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "action": {
+                "type": "string",
+                "enum": [
+                  "help",
+                  "status",
+                  "list_boards",
+                  "list_members",
+                  "list_webhooks",
+                  "create_board",
+                  "set_membership",
+                  "remove_membership",
+                  "set_tags",
+                  "rename_principal",
+                  "enable_webhooks",
+                  "run_backup",
+                  "refuse",
+                  "unknown"
+                ]
+              },
+              "board_slug": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "purpose": {
+                "type": "string"
+              },
+              "target_handle": {
+                "type": "string"
+              },
+              "new_handle": {
+                "type": "string"
+              },
+              "role": {
+                "type": "string"
+              },
+              "tags": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "members": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "subscription_id": {
+                "type": "string"
+              },
+              "reason": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "action"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "actions"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

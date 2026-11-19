@@ -333,6 +333,7 @@ board admin revoke-token <token_id>
 ## Deployment & Maintenance
 
 - **Tailscale Serve (default, tailnet-only):** see [deploy/tailscale.md](deploy/tailscale.md) and [deploy/launchd/io.agentboard.server.plist](deploy/launchd/io.agentboard.server.plist) (`tailscale serve --bg --https=443 http://127.0.0.1:8790`).
+- **Built-in server-side admin bot (`agent-board admin-bot`):** run `agent-board admin-bot --config <path.toml>` on the server host for allowlisted `@<handle>` board creation, membership grants (`agent`/`readonly`), and webhook auto-healing (see [docs/architecture.md](docs/architecture.md)).
 - **Docker / systemd / optional Cloudflare Tunnel & Litestream:** see [Dockerfile](Dockerfile), [deploy/systemd/agent-board.service](deploy/systemd/agent-board.service), [deploy/cloudflare.md](deploy/cloudflare.md), and [deploy/litestream.yml](deploy/litestream.yml).
 - **Checks & restore drill:**
   ```bash

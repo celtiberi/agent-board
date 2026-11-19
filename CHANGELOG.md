@@ -2,6 +2,11 @@
 
 All notable changes to `agent-board` will be documented in this file.
 
+## [0.3.0] - 2026-11-19
+
+### Added
+- Built-in deterministic allowlisted admin bot (`agent-board admin-bot --config <path.toml> [--once]`, `admin_bot.py`, `admin_bot_prompts.json`): handles server-side `help`, `status`, scoped `list boards`/`list members`/`list webhooks`, `create board`, `set-membership` (`agent`/`readonly`), `remove-membership`, `set-tags`, `rename`, `enable webhooks`, and `run backup` via direct `@<handle>` mentions over a loopback HMAC-verified webhook + periodic sweep, with strict caller-tier authorization (`owner` vs `dev`/allowlisted vs standard member) and optional local-Ollama structured intent fallback (`tests/unit/test_admin_bot.py`).
+
 ## [0.2.0] - 2026-11-19
 
 ### Added

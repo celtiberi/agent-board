@@ -289,3 +289,19 @@ def serve(
         services = AppServices.create(settings)
         app = create_app(services)
         uvicorn.run(app, host=host, port=port)
+
+
+@admin_app.command("admin-bot")
+def admin_bot_cmd(
+    config: Path = typer.Option(..., "--config", help="Path to board-admin TOML config file."),
+    once: bool = typer.Option(False, "--once", help="Process unread mentions once and exit."),
+) -> None:
+    """Run the deterministic allowlisted @board-admin daemon."""
+    from agent_board.admin_bot import load_admin_bot_config, run_admin_bot, run_once
+
+    cfg = load_admin_bot_config(config)
+    if once:
+        processed = run_once(cfg)
+        typer.echo(f"Processed {processed} message(s).")
+        return
+    raise SystemExit(run_admin_bot(cfg))

@@ -158,9 +158,11 @@ def build_mcp_server(services: AppServices) -> tuple[MCPServer, ASGIApp]:
     @mcp.tool(
         description=(
             "Post a message (note, task, question, status, retest_report, or summary) to a thread. "
-            "Pass thread_id or thread_title (defaults to 'general'). "
-            "Webhook wakes: @handle wakes only the mentioned recipient(s), @<tag> wakes active members "
-            "carrying that tag, @all/@everyone wakes everyone on the board, and unmentioned notes stay silent."
+            "Pass thread_id or thread_title (defaults to 'general'; use distinct topic threads per workstream). "
+            "Routing envelope: pass `to` (list of handles, tags, or 'all') for recipients who should wake and act, "
+            "`cc` for FYI visibility without waking, and `to=[]` for courtesy closures ('thanks', 'noted', 'LGTM') "
+            "or quiet logs so nobody wakes. If `to` is omitted, paragraph-leading `@handle`s wake before falling "
+            "back to body mentions or unmentioned actionable types."
         )
     )
     def post_message(
@@ -169,6 +171,8 @@ def build_mcp_server(services: AppServices) -> tuple[MCPServer, ASGIApp]:
         body_md: str,
         thread_id: str | None = None,
         thread_title: str | None = None,
+        to: list[str] | None = None,
+        cc: list[str] | None = None,
         data: dict[str, Any] | None = None,
         reply_to_id: str | None = None,
         attachment_ids: list[str] | None = None,
@@ -185,6 +189,8 @@ def build_mcp_server(services: AppServices) -> tuple[MCPServer, ASGIApp]:
                 body_md=body_md,
                 thread_id=thread_id,
                 thread_title=thread_title,
+                to=to,
+                cc=cc,
                 data=data,
                 reply_to_id=reply_to_id,
                 attachment_ids=attachment_ids,
@@ -197,6 +203,8 @@ def build_mcp_server(services: AppServices) -> tuple[MCPServer, ASGIApp]:
         board: str,
         message_id: str,
         body_md: str,
+        to: list[str] | None = None,
+        cc: list[str] | None = None,
         data: dict[str, Any] | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
@@ -209,6 +217,8 @@ def build_mcp_server(services: AppServices) -> tuple[MCPServer, ASGIApp]:
                 board_slug=board,
                 message_id=message_id,
                 body_md=body_md,
+                to=to,
+                cc=cc,
                 data=data,
                 idempotency_key=idempotency_key,
             ),

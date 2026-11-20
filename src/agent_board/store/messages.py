@@ -81,13 +81,33 @@ def delete_message_fts_by_root(conn: sqlite3.Connection, root_id: str) -> None:
         conn.execute("DELETE FROM messages_fts WHERE rowid = ?", (int(row["rowid"]),))
 
 
-def insert_mentions(conn: sqlite3.Connection, message_id: str, principal_ids: list[str]) -> None:
+def insert_mentions(
+    conn: sqlite3.Connection,
+    message_id: str,
+    principal_ids: list[str],
+    *,
+    role: str = "to",
+) -> None:
     if not principal_ids:
         return
     conn.executemany(
-        "INSERT OR IGNORE INTO mentions (message_id, principal_id) VALUES (?, ?)",
-        [(message_id, pid) for pid in principal_ids],
+        "INSERT OR IGNORE INTO mentions (message_id, principal_id, role) VALUES (?, ?, ?)",
+        [(message_id, pid, role) for pid in principal_ids],
     )
+
+
+def insert_recipients(
+    conn: sqlite3.Connection,
+    message_id: str,
+    *,
+    to_ids: list[str],
+    cc_ids: list[str],
+) -> None:
+    """Persist structured To/Cc recipients with To taking precedence if duplicated."""
+    to_set = set(to_ids)
+    insert_mentions(conn, message_id, list(dict.fromkeys(to_ids)), role="to")
+    cc_only = [pid for pid in dict.fromkeys(cc_ids) if pid not in to_set]
+    insert_mentions(conn, message_id, cc_only, role="cc")
 
 
 def get_message_by_id(conn: sqlite3.Connection, message_id: str) -> sqlite3.Row | None:
@@ -213,13 +233,16 @@ def read_thread_snapshot(conn: sqlite3.Connection, thread_id: str) -> list[sqlit
     ).fetchall()
 
 
-def get_mentions_for_messages(conn: sqlite3.Connection, message_ids: list[str]) -> dict[str, list[str]]:
+def get_recipients_for_messages(
+    conn: sqlite3.Connection, message_ids: list[str]
+) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
+    """Return (to_by_msg, cc_by_msg) handle lists sorted by handle for each message ID."""
     if not message_ids:
-        return {}
+        return {}, {}
     placeholders = ",".join("?" for _ in message_ids)
     rows = conn.execute(
         f"""
-        SELECT mn.message_id, p.handle
+        SELECT mn.message_id, p.handle, mn.role
         FROM mentions mn
         JOIN principals p ON p.id = mn.principal_id
         WHERE mn.message_id IN ({placeholders})
@@ -227,10 +250,16 @@ def get_mentions_for_messages(conn: sqlite3.Connection, message_ids: list[str]) 
         """,
         message_ids,
     ).fetchall()
-    result: dict[str, list[str]] = {}
+    to_map: dict[str, list[str]] = {}
+    cc_map: dict[str, list[str]] = {}
     for row in rows:
-        result.setdefault(row["message_id"], []).append(row["handle"])
-    return result
+        target = cc_map if row["role"] == "cc" else to_map
+        target.setdefault(row["message_id"], []).append(row["handle"])
+    return to_map, cc_map
+
+
+def get_mentions_for_messages(conn: sqlite3.Connection, message_ids: list[str]) -> dict[str, list[str]]:
+    return get_recipients_for_messages(conn, message_ids)[0]
 
 
 def get_attachments_for_messages(conn: sqlite3.Connection, message_ids: list[str]) -> dict[str, list[sqlite3.Row]]:

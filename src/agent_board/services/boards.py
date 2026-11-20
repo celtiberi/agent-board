@@ -386,6 +386,8 @@ def create_thread(
                     thread_id=thread_id,
                     msg_type=str(first_message.get("type", "note")),
                     body_md=str(first_message.get("body_md", "")),
+                    to=first_message.get("to"),
+                    cc=first_message.get("cc"),
                     data=first_message.get("data"),
                     reply_to_id=first_message.get("reply_to_id"),
                     attachment_ids=first_message.get("attachment_ids"),

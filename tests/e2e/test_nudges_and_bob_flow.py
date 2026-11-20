@@ -877,3 +877,99 @@ async def test_group_tag_mentions_handle_precedence_and_admin_shout(env: BoardTe
     res_all_boards = await _drain()
     assert [n["board"] for n in res_all_boards["bob"]] == ["alpha"]
     assert sorted(n["board"] for n in res_all_boards["outsider"]) == ["beta", "qa-only"]
+
+
+async def test_to_cc_envelope_routing_and_trigger_metadata(env: BoardTestEnv) -> None:
+    from agent_board.services.auth import authenticate_bearer, create_principal, create_token
+
+    create_principal(env.services, env.owner_ctx, handle="alice", kind="agent", display_name="Alice")
+    set_membership(env.services, env.owner_ctx, board_slug="alpha", principal_handle="alice", role="agent")
+    alice_tok = create_token(
+        env.services, env.owner_ctx, principal_handle="alice", name="alice", board_scope=["*"], max_role="agent"
+    )["token"]
+    alice_ctx = authenticate_bearer(env.services, alice_tok)
+
+    received: dict[str, list[dict[str, Any]]] = {"bob": [], "alice": []}
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        jsonschema.validate(body, _NUDGE_SCHEMA)
+        received[str(body["principal"])].append(body)
+        return httpx.Response(200, json={"ok": True})
+
+    for handle, ctx_item in (("bob", env.bob_ctx), ("alice", alice_ctx)):
+        delivery_svc.create_subscription(
+            env.services,
+            ctx_item,
+            url=f"https://hooks.example/{handle}",
+            boards=["alpha"],
+            min_interval_s=0,
+            debounce_s=0,
+        )
+
+    worker = NudgeWorker(env.services, transport=httpx.MockTransport(_handler))
+
+    async def _drain() -> dict[str, list[dict[str, Any]]]:
+        await worker.process_due_once(now=utc_now() + timedelta(seconds=5))
+        snap = {k: list(v) for k, v in received.items()}
+        for lst in received.values():
+            lst.clear()
+        return snap
+
+    # 1. Explicit to=['bob'], cc=['alice'] wakes ONLY bob and records trigger_seqs/threads/reason.
+    app = create_app(env.services, enable_background_tasks=False)
+    transport = httpx2.ASGITransport(app=app)
+    async with httpx2.AsyncClient(transport=transport, base_url="http://test") as client:
+        post_resp = await client.post(
+            "/api/v1/boards/alpha/messages",
+            headers={"Authorization": f"Bearer {env.dev_token}"},
+            json={
+                "thread_title": "website-docs",
+                "type": "task",
+                "body_md": "Verify deploy @alice mentioned casually",
+                "to": ["bob"],
+                "cc": "alice",
+            },
+        )
+        assert post_resp.status_code == 201
+        posted = post_resp.json()
+        assert posted["to"] == ["bob"]
+        assert posted["cc"] == ["alice"]
+
+    res1 = await _drain()
+    assert len(res1["bob"]) == 1
+    assert res1["bob"][0]["trigger_seqs"] == [posted["seq"]]
+    assert res1["bob"][0]["trigger_threads"] == ["website-docs"]
+    assert res1["bob"][0]["reason"] == "to"
+    assert res1["alice"] == []
+    delivery_svc.ack_cursor(env.services, env.bob_ctx, board_slug="alpha", read_seq=posted["seq"])
+
+    # 2. Courtesy closure with to=[], cc=['bob'] and type='status' generates zero wakes.
+    silent_post = messages_svc.post_message(
+        env.services,
+        env.dev_ctx,
+        board_slug="alpha",
+        msg_type="status",
+        thread_title="website-docs",
+        body_md="Thanks @bob, PASS noted!",
+        to=[],
+        cc=["bob"],
+    )
+    assert await _drain() == {"bob": [], "alice": []}
+    delivery_svc.ack_cursor(env.services, env.bob_ctx, board_slug="alpha", read_seq=silent_post["seq"])
+
+    # 3. Legacy omission (to=None): '@bob docs live with @alice fixes' wakes ONLY bob.
+    legacy = messages_svc.post_message(
+        env.services,
+        env.dev_ctx,
+        board_slug="alpha",
+        msg_type="note",
+        thread_title="website-docs",
+        body_md="@bob docs live with @alice's accuracy fixes.",
+    )
+    assert legacy["to"] == ["bob"]
+    res3 = await _drain()
+    assert len(res3["bob"]) == 1
+    assert res3["bob"][0]["trigger_seqs"] == [legacy["seq"]]
+    assert res3["bob"][0]["trigger_threads"] == ["website-docs"]
+    assert res3["alice"] == []

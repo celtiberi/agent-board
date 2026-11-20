@@ -19,7 +19,6 @@ from agent_board.services.shout import shout as shout
 from agent_board.store import boards as boards_store
 from agent_board.store import delivery as delivery_store
 from agent_board.store import messages as messages_store
-from agent_board.store import principals as principals_store
 
 VALID_MESSAGE_TYPES = frozenset(
     {
@@ -36,6 +35,11 @@ VALID_MESSAGE_TYPES = frozenset(
 )
 DIRECT_POST_TYPES = frozenset({"note", "task", "question", "status", "retest_report", "summary"})
 _MENTION_RE = re.compile(r"(?<![A-Za-z0-9_.-])@([a-z0-9][a-z0-9_-]{0,48}[a-z0-9]?)")
+_FENCE_LINE_RE = re.compile(r"^\s*(`{3,}|~{3,})(.*)$")
+_LEADING_HANDLE_RE = re.compile(
+    r"^@([a-z0-9][a-z0-9_-]{0,48}[a-z0-9]?)(?![A-Za-z0-9_-])(?:[\s,]+(?:(?:and|&)\s+(?=@))?)?",
+    re.IGNORECASE,
+)
 _FENCED_CODE_RE = re.compile(r"(?ms)^[ \t]*(```+|~~~+)[^\n]*\n(?:.*?\n)?[ \t]*\1[ \t]*$")
 _INLINE_CODE_RE = re.compile(r"(`+)(?!`)(.+?)(?<!`)\1(?!`)")
 
@@ -44,6 +48,42 @@ def _strip_markdown_code(body_md: str) -> str:
     """Remove fenced code blocks and inline code spans before scanning for @mentions."""
     stripped = _FENCED_CODE_RE.sub(" ", body_md)
     return _INLINE_CODE_RE.sub(" ", stripped)
+
+
+def _extract_paragraph_leading_handles(body_md: str) -> list[str]:
+    """Collect @handle/@tag/@all tokens opening any non-code, non-blockquote line."""
+    handles: list[str] = []
+    seen: set[str] = set()
+    fence_char: str | None = None
+    fence_len = 0
+
+    for line in (body_md or "").splitlines():
+        stripped = line.lstrip()
+        fence_m = _FENCE_LINE_RE.match(stripped)
+        if fence_char is not None:
+            if fence_m and fence_m.group(1)[0] == fence_char and len(fence_m.group(1)) >= fence_len:
+                if not fence_m.group(2).strip():
+                    fence_char = None
+                    fence_len = 0
+            continue
+        if fence_m:
+            fence_char = fence_m.group(1)[0]
+            fence_len = len(fence_m.group(1))
+            continue
+        if stripped.startswith(">"):
+            continue
+
+        rest = stripped
+        while rest:
+            m = _LEADING_HANDLE_RE.match(rest)
+            if not m:
+                break
+            tok = m.group(1).lower()
+            if tok not in seen:
+                seen.add(tok)
+                handles.append(tok)
+            rest = rest[m.end() :]
+    return handles
 
 
 def validate_message_data(services: AppServices, msg_type: str, data: Any) -> dict[str, Any] | None:
@@ -62,22 +102,28 @@ def validate_message_data(services: AppServices, msg_type: str, data: Any) -> di
     return data
 
 
-def _extract_mentions(
+def _resolve_recipients(
     conn: sqlite3.Connection,
     body_md: str,
     *,
     board_id: str,
+    board_slug: str = "",
     author_id: str,
-) -> tuple[list[str], bool, bool]:
-    """Resolve @handle mentions, @<tag> group mentions, and @all/@everyone broadcasts."""
-    raw_handles = list(dict.fromkeys(_MENTION_RE.findall(_strip_markdown_code(body_md).lower())))
-    if not raw_handles:
-        return [], False, False
-
-    is_broadcast = any(h in BROADCAST_MENTIONS for h in raw_handles)
+    to: list[str] | None = None,
+    cc: list[str] | None = None,
+) -> tuple[list[str], list[str], bool, bool]:
+    """Resolve To (waking) and Cc (FYI-only) recipients, using explicit envelope or leading fallback."""
     members = boards_store.list_memberships_for_board(conn, board_id)
     active_members = [m for m in members if m["kind"] != "system" and m["disabled_at"] is None]
-    member_ids = {str(m["principal_id"]) for m in active_members}
+
+    valid_handles_by_name: dict[str, str] = {
+        str(m["handle"]).lower(): str(m["principal_id"]) for m in active_members
+    }
+    owner_rows = conn.execute(
+        "SELECT id, handle FROM principals WHERE is_server_owner = 1 AND kind != 'system' AND disabled_at IS NULL"
+    ).fetchall()
+    for owner in owner_rows:
+        valid_handles_by_name.setdefault(str(owner["handle"]).lower(), str(owner["id"]))
 
     members_by_tag: dict[str, list[str]] = {}
     for m in active_members:
@@ -86,50 +132,93 @@ def _extract_mentions(
         for t in json.loads(raw_tags):
             members_by_tag.setdefault(str(t).lower(), []).append(pid)
 
-    direct_tokens = [h for h in raw_handles if h not in BROADCAST_MENTIONS]
-    matched_by_handle: dict[str, str] = {}
-    if direct_tokens:
-        rows = principals_store.get_principals_by_handles(conn, direct_tokens)
-        for r in rows:
-            if (
-                r["kind"] != "system"
-                and r["disabled_at"] is None
-                and (bool(r["is_server_owner"]) or str(r["id"]) in member_ids)
-            ):
-                matched_by_handle[str(r["handle"]).lower()] = str(r["id"])
-
-    mentioned_ids: list[str] = []
-    seen = set()
-    is_directed = False
-    for tok in direct_tokens:
-        if tok in matched_by_handle:
-            is_directed = True
-            pid = matched_by_handle[tok]
-            if pid not in seen:
-                mentioned_ids.append(pid)
-                seen.add(pid)
-        elif tok in members_by_tag:
-            is_directed = True
-            for pid in members_by_tag[tok]:
-                if pid != author_id and pid not in seen:
-                    mentioned_ids.append(pid)
+    def _expand_tokens(tokens: list[str], *, strict: bool, field_name: str) -> tuple[list[str], bool, bool]:
+        resolved_ids: list[str] = []
+        seen: set[str] = set()
+        broadcast = False
+        matched_any = False
+        for raw_tok in tokens:
+            tok = str(raw_tok).strip().lstrip("@").lower()
+            if not tok:
+                continue
+            if tok in BROADCAST_MENTIONS:
+                broadcast = True
+                for m in active_members:
+                    pid = str(m["principal_id"])
+                    if pid != author_id and pid not in seen:
+                        resolved_ids.append(pid)
+                        seen.add(pid)
+            elif tok in valid_handles_by_name:
+                matched_any = True
+                pid = valid_handles_by_name[tok]
+                if pid not in seen:
+                    resolved_ids.append(pid)
                     seen.add(pid)
+            elif tok in members_by_tag:
+                matched_any = True
+                for pid in members_by_tag[tok]:
+                    if pid != author_id and pid not in seen:
+                        resolved_ids.append(pid)
+                        seen.add(pid)
+            elif strict:
+                valid_opts = sorted(set(valid_handles_by_name) | set(members_by_tag) | set(BROADCAST_MENTIONS))
+                board_label = f" on board '{board_slug}'" if board_slug else ""
+                raise ValidationError(
+                    f"Unknown recipient '{tok}' in '{field_name}'{board_label}; "
+                    f"valid handles/tags: {', '.join(valid_opts)}"
+                )
+        return resolved_ids, broadcast, matched_any
 
-    if is_broadcast:
-        for m in active_members:
-            pid = str(m["principal_id"])
-            if pid != author_id and pid not in seen:
-                mentioned_ids.append(pid)
-                seen.add(pid)
+    is_broadcast = False
+    is_directed = False
+    if to is not None:
+        to_ids, is_broadcast, _ = _expand_tokens(to, strict=True, field_name="to")
+        is_directed = True
+    else:
+        leading_tokens = _extract_paragraph_leading_handles(body_md)
+        leading_ids, leading_broadcast, leading_matched = _expand_tokens(
+            leading_tokens, strict=False, field_name="to"
+        )
+        if leading_ids or leading_broadcast or leading_matched:
+            to_ids = leading_ids
+            is_broadcast = leading_broadcast
+            is_directed = not leading_broadcast
+        else:
+            raw_tokens = list(dict.fromkeys(_MENTION_RE.findall(_strip_markdown_code(body_md).lower())))
+            to_ids, is_broadcast, matched_any = _expand_tokens(raw_tokens, strict=False, field_name="to")
+            is_directed = matched_any and not is_broadcast
 
-    return mentioned_ids, is_broadcast, is_directed
+    to_set = set(to_ids)
+    cc_ids: list[str] = []
+    if cc is not None:
+        raw_cc_ids, _, _ = _expand_tokens(cc, strict=True, field_name="cc")
+        cc_ids = [pid for pid in raw_cc_ids if pid not in to_set]
+
+    return to_ids, cc_ids, is_broadcast, is_directed
+
+
+def _extract_mentions(
+    conn: sqlite3.Connection,
+    body_md: str,
+    *,
+    board_id: str,
+    author_id: str,
+) -> tuple[list[str], bool, bool]:
+    """Legacy wrapper resolving body @mentions into waking To recipient IDs."""
+    to_ids, _, is_broadcast, is_directed = _resolve_recipients(
+        conn,
+        body_md,
+        board_id=board_id,
+        author_id=author_id,
+    )
+    return to_ids, is_broadcast, is_directed
 
 
 def _hydrate_messages(conn: sqlite3.Connection, rows: list[sqlite3.Row]) -> list[dict[str, Any]]:
     if not rows:
         return []
     msg_ids = [r["id"] for r in rows]
-    mentions_map = messages_store.get_mentions_for_messages(conn, msg_ids)
+    to_map, cc_map = messages_store.get_recipients_for_messages(conn, msg_ids)
     attachments_map = messages_store.get_attachments_for_messages(conn, msg_ids)
     result: list[dict[str, Any]] = []
     for r in rows:
@@ -146,6 +235,8 @@ def _hydrate_messages(conn: sqlite3.Connection, rows: list[sqlite3.Row]) -> list
             }
             for a in attachments_map.get(r["id"], [])
         ]
+        to_handles = to_map.get(r["id"], [])
+        cc_handles = cc_map.get(r["id"], [])
         result.append(
             {
                 "id": r["id"],
@@ -160,7 +251,9 @@ def _hydrate_messages(conn: sqlite3.Connection, rows: list[sqlite3.Row]) -> list
                 "body_md": r["body_md"],
                 "data": json.loads(r["data"]) if r["data"] is not None else None,
                 "warnings": json.loads(r["warnings_json"]),
-                "mentions": mentions_map.get(r["id"], []),
+                "to": to_handles,
+                "cc": cc_handles,
+                "mentions": list(to_handles),
                 "attachments": atts,
                 "reply_to_id": r["reply_to_id"],
                 "supersedes_id": r["supersedes_id"],
@@ -250,6 +343,8 @@ def post_message_in_tx(
     body_md: str,
     thread_id: str | None = None,
     thread_title: str | None = None,
+    to: list[str] | None = None,
+    cc: list[str] | None = None,
     data: dict[str, Any] | None = None,
     reply_to_id: str | None = None,
     attachment_ids: list[str] | None = None,
@@ -298,11 +393,14 @@ def post_message_in_tx(
                 raise ConflictError(f"Attachment '{att_id}' is already attached to a message")
 
     warnings = ["secret redacted"] if redacted else []
-    mentioned_ids, is_broadcast, is_directed = _extract_mentions(
+    to_ids, cc_ids, is_broadcast, is_directed = _resolve_recipients(
         conn,
         clean_body,
         board_id=board["id"],
+        board_slug=board["slug"],
         author_id=ctx.principal_id,
+        to=to,
+        cc=cc,
     )
 
     msg_id = new_ulid()
@@ -332,7 +430,7 @@ def post_message_in_tx(
         if linked != len(clean_att_ids):
             raise ConflictError("One or more attachments could not be linked")
 
-    messages_store.insert_mentions(conn, msg_id, mentioned_ids)
+    messages_store.insert_recipients(conn, msg_id, to_ids=to_ids, cc_ids=cc_ids)
     messages_store.upsert_message_fts(
         conn,
         root_rowid=root_rowid,
@@ -356,7 +454,7 @@ def post_message_in_tx(
             seq=seq,
             author_id=ctx.principal_id,
             msg_type=msg_type,
-            mentioned_principal_ids=set(mentioned_ids),
+            mentioned_principal_ids=set(to_ids),
             is_broadcast=is_broadcast,
             is_directed=is_directed,
             now_iso=ts,
@@ -375,6 +473,8 @@ def post_message(
     body_md: str,
     thread_id: str | None = None,
     thread_title: str | None = None,
+    to: list[str] | None = None,
+    cc: list[str] | None = None,
     data: dict[str, Any] | None = None,
     reply_to_id: str | None = None,
     attachment_ids: list[str] | None = None,
@@ -404,6 +504,8 @@ def post_message(
                 body_md=clean_body,
                 thread_id=thread_id,
                 thread_title=clean_title,
+                to=to,
+                cc=cc,
                 data=payload_data,
                 reply_to_id=reply_to_id,
                 attachment_ids=attachment_ids,
@@ -430,6 +532,8 @@ def post_message(
                 "thread_title": clean_title,
                 "type": msg_type,
                 "body_md": clean_body,
+                "to": to,
+                "cc": cc,
                 "data": payload_data,
                 "reply_to_id": reply_to_id,
                 "attachment_ids": attachment_ids,
@@ -447,6 +551,8 @@ def edit_message(
     board_slug: str,
     message_id: str,
     body_md: str,
+    to: list[str] | None = None,
+    cc: list[str] | None = None,
     data: dict[str, Any] | None = None,
     idempotency_key: str | None = None,
 ) -> dict[str, Any]:
@@ -495,11 +601,14 @@ def edit_message(
         def _do() -> dict[str, Any]:
             now_iso = utc_now_iso()
             warnings = ["secret redacted"] if redacted else []
-            mentioned_ids, is_broadcast, is_directed = _extract_mentions(
+            to_ids, cc_ids, is_broadcast, is_directed = _resolve_recipients(
                 conn,
                 clean_body,
                 board_id=board["id"],
+                board_slug=board["slug"],
                 author_id=ctx.principal_id,
+                to=to,
+                cc=cc,
             )
 
             new_id = new_ulid()
@@ -521,7 +630,7 @@ def edit_message(
                 root_seq=int(target["root_seq"]),
                 created_at=now_iso,
             )
-            messages_store.insert_mentions(conn, new_id, mentioned_ids)
+            messages_store.insert_recipients(conn, new_id, to_ids=to_ids, cc_ids=cc_ids)
             messages_store.upsert_message_fts(
                 conn,
                 root_rowid=root_rowid,
@@ -544,7 +653,7 @@ def edit_message(
                 seq=seq,
                 author_id=ctx.principal_id,
                 msg_type=target["type"],
-                mentioned_principal_ids=set(mentioned_ids),
+                mentioned_principal_ids=set(to_ids),
                 is_broadcast=is_broadcast,
                 is_directed=is_directed,
                 now_iso=now_iso,
@@ -567,7 +676,7 @@ def edit_message(
             ctx=ctx,
             key=idempotency_key,
             operation=f"message.edit:{board['slug']}:{message_id}",
-            request_payload={"body_md": clean_body, "data": clean_data},
+            request_payload={"body_md": clean_body, "to": to, "cc": cc, "data": clean_data},
             status_code=200,
             fn=_do,
         )

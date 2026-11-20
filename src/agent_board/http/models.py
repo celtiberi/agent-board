@@ -4,7 +4,18 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
+
+
+def _coerce_recipient_list(value: Any) -> list[str] | None:
+    """Accept None, a list of handles/tags, or a comma-separated string."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return [part.strip() for part in value.split(",") if part.strip()]
+    if isinstance(value, (list, tuple)):
+        return [str(item).strip() for item in value if str(item).strip()]
+    raise ValueError("Recipients must be a list of handles/tags or a comma-separated string")
 
 
 class CreateBoardRequest(BaseModel):
@@ -24,9 +35,16 @@ class UpdateBoardRequest(BaseModel):
 class FirstMessageInput(BaseModel):
     type: str = "note"
     body_md: str
+    to: list[str] | None = None
+    cc: list[str] | None = None
     data: dict[str, Any] | None = None
     reply_to_id: str | None = None
     attachment_ids: list[str] | None = None
+
+    @field_validator("to", "cc", mode="before")
+    @classmethod
+    def _validate_recipients(cls, v: Any) -> list[str] | None:
+        return _coerce_recipient_list(v)
 
 
 class CreateThreadRequest(BaseModel):
@@ -41,14 +59,28 @@ class PostMessageRequest(BaseModel):
     thread_title: str | None = None
     type: str = "note"
     body_md: str = Field(validation_alias=AliasChoices("body_md", "body", "content", "message"))
+    to: list[str] | None = None
+    cc: list[str] | None = None
     data: dict[str, Any] | None = None
     reply_to_id: str | None = None
     attachment_ids: list[str] | None = None
 
+    @field_validator("to", "cc", mode="before")
+    @classmethod
+    def _validate_recipients(cls, v: Any) -> list[str] | None:
+        return _coerce_recipient_list(v)
+
 
 class EditMessageRequest(BaseModel):
     body_md: str
+    to: list[str] | None = None
+    cc: list[str] | None = None
     data: dict[str, Any] | None = None
+
+    @field_validator("to", "cc", mode="before")
+    @classmethod
+    def _validate_recipients(cls, v: Any) -> list[str] | None:
+        return _coerce_recipient_list(v)
 
 
 class RedactMessageRequest(BaseModel):

@@ -134,6 +134,18 @@ def brief(
         typer.echo(res)
 
 
+def _format_message_line(m: dict[str, Any]) -> str:
+    to_list = m.get("to") if "to" in m else (m.get("mentions") or [])
+    cc_list = m.get("cc") or []
+    env_parts: list[str] = []
+    if to_list:
+        env_parts.append("to: " + ", ".join(f"@{h}" for h in to_list))
+    if cc_list:
+        env_parts.append("cc: " + ", ".join(f"@{h}" for h in cc_list))
+    env_suffix = f" [{' | '.join(env_parts)}]" if env_parts else ""
+    return f"#{m['seq']} [{m['type']}] @{m['author_handle']} ({m['thread_title']}){env_suffix}: {m['body_md']}"
+
+
 @client_app.command()
 def read(
     slug: str = typer.Argument(...),
@@ -147,7 +159,7 @@ def read(
     with _client() as c:
         data = _check_resp(c.get(f"/boards/{slug}/messages", params=params))
     for m in data["messages"]:
-        typer.echo(f"#{m['seq']} [{m['type']}] @{m['author_handle']} ({m['thread_title']}): {m['body_md']}")
+        typer.echo(_format_message_line(m))
 
 
 @client_app.command()
@@ -162,7 +174,7 @@ def tail(
         while True:
             data = _check_resp(c.get(f"/boards/{slug}/messages", params={"since_seq": since}))
             for m in data["messages"]:
-                typer.echo(f"#{m['seq']} [{m['type']}] @{m['author_handle']} ({m['thread_title']}): {m['body_md']}")
+                typer.echo(_format_message_line(m))
             since = data["next_since_seq"]
             time.sleep(interval)
 
@@ -173,15 +185,29 @@ def post(
     message: str = typer.Option(..., "-m", "--message"),
     thread: str = typer.Option("general", "--thread"),
     msg_type: str = typer.Option("note", "--type"),
+    to: str | None = typer.Option(None, "--to", help="Comma-separated recipients to wake (pass '' for none)."),
+    cc: str | None = typer.Option(None, "--cc", help="Comma-separated FYI recipients (never wakes)."),
+    silent: bool = typer.Option(False, "--silent", help="Set to=[] so no recipients wake."),
     idempotency_key: str | None = typer.Option(None, "--idempotency-key"),
 ) -> None:
     """Post a message to a board."""
+    parsed_to = [x.strip() for x in to.split(",") if x.strip()] if to is not None else None
+    if silent:
+        if parsed_to:
+            raise typer.BadParameter("Cannot combine --silent with non-empty --to")
+        parsed_to = []
+    payload: dict[str, Any] = {"thread_title": thread, "type": msg_type, "body_md": message}
+    if parsed_to is not None:
+        payload["to"] = parsed_to
+    if cc is not None:
+        payload["cc"] = [x.strip() for x in cc.split(",") if x.strip()]
+
     headers = {"Idempotency-Key": idempotency_key} if idempotency_key else {}
     with _client() as c:
         data = _check_resp(
             c.post(
                 f"/boards/{slug}/messages",
-                json={"thread_title": thread, "type": msg_type, "body_md": message},
+                json=payload,
                 headers=headers,
             )
         )

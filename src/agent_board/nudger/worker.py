@@ -83,6 +83,9 @@ class NudgeWorker:
             "unread_for_you": 0,
             "types": ["system"],
             "mentioned": False,
+            "trigger_seqs": [],
+            "trigger_threads": [],
+            "reason": "test",
             "nudge_id": nudge_id,
             "sent_at": now_iso,
         }
@@ -173,12 +176,14 @@ class NudgeWorker:
                         )
                 continue
 
-            unread_count, types, mentioned = delivery_store.get_unread_summary_for_nudge(
+            details = delivery_store.get_nudge_unread_details(
                 rconn,
                 board_id=row["board_id"],
                 principal_id=row["principal_id"],
                 read_seq=read_seq,
+                filter_cfg=json.loads(row["filter"]),
             )
+            unread_count = int(details["unread_count"])
             if unread_count == 0:
                 with self.services.db.write_tx() as conn:
                     delivery_store.mark_outbox_suppressed(conn, outbox_id=row["id"], reason="zero_unread")
@@ -191,8 +196,11 @@ class NudgeWorker:
                 "subscription_id": row["subscription_id"],
                 "latest_seq": int(row["latest_seq"]),
                 "unread_for_you": unread_count,
-                "types": types,
-                "mentioned": mentioned,
+                "types": details["types"],
+                "mentioned": details["mentioned"],
+                "trigger_seqs": details["trigger_seqs"],
+                "trigger_threads": details["trigger_threads"],
+                "reason": details["reason"],
                 "nudge_id": row["id"],
                 "sent_at": now_iso,
             }

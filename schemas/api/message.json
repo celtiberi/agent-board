@@ -16,6 +16,8 @@
     "body_md": { "type": "string" },
     "data": { "type": ["object", "null"] },
     "warnings": { "type": "array", "items": { "type": "string" } },
+    "to": { "type": "array", "items": { "type": "string" } },
+    "cc": { "type": "array", "items": { "type": "string" } },
     "mentions": { "type": "array", "items": { "type": "string" } },
     "attachments": {
       "type": "array",

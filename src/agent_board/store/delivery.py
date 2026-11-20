@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+from typing import Any
 
 
 def get_cursor(conn: sqlite3.Connection, principal_id: str, board_id: str) -> int:
@@ -552,31 +553,83 @@ def record_outbox_failure(
     return failures, auto_disabled
 
 
-def get_unread_summary_for_nudge(
-    conn: sqlite3.Connection, *, board_id: str, principal_id: str, read_seq: int
-) -> tuple[int, list[str], bool]:
+def get_nudge_unread_details(
+    conn: sqlite3.Connection,
+    *,
+    board_id: str,
+    principal_id: str,
+    read_seq: int,
+    filter_cfg: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Compute unread summary and triggering message seq/thread metadata for webhook delivery."""
     rows = conn.execute(
         """
-        SELECT m.id, m.type, m.author_id,
+        SELECT m.id, m.seq, m.type, t.title AS thread_title,
                EXISTS(
                    SELECT 1 FROM mentions mn
-                   WHERE mn.message_id = m.id AND mn.principal_id = ?
-               ) AS is_mentioned
+                   WHERE mn.message_id = m.id AND mn.principal_id = ? AND mn.role = 'to'
+               ) AS is_to,
+               EXISTS(
+                   SELECT 1 FROM mentions mn
+                   WHERE mn.message_id = m.id AND mn.role = 'to'
+               ) AS has_any_to
         FROM messages m
+        JOIN threads t ON t.id = m.thread_id
         WHERE m.board_id = ? AND m.seq > ? AND m.author_id != ?
         ORDER BY m.seq ASC
         """,
         (principal_id, board_id, read_seq, principal_id),
     ).fetchall()
+    flt = filter_cfg or {}
+    mentions_only = bool(flt.get("mentions_only", False))
+    allowed_types = flt.get("types") or []
+
     unread_count = len(rows)
     seen_types: list[str] = []
     mentioned = False
+    trigger_seqs: list[int] = []
+    trigger_threads: list[str] = []
+    seen_threads: set[str] = set()
+
     for row in rows:
         if row["type"] not in seen_types:
             seen_types.append(row["type"])
-        if row["is_mentioned"]:
+        is_to = bool(row["is_to"])
+        if is_to:
             mentioned = True
-    return unread_count, seen_types, mentioned
+        matches = is_to or (
+            not bool(row["has_any_to"])
+            and not mentions_only
+            and (not allowed_types or row["type"] in allowed_types)
+        )
+        if matches:
+            trigger_seqs.append(int(row["seq"]))
+            title = str(row["thread_title"])
+            if title not in seen_threads:
+                seen_threads.add(title)
+                trigger_threads.append(title)
+
+    reason = "to" if mentioned else ("actionable_type" if trigger_seqs else "activity")
+    return {
+        "unread_count": unread_count,
+        "types": seen_types,
+        "mentioned": mentioned,
+        "trigger_seqs": trigger_seqs[-20:],
+        "trigger_threads": trigger_threads[-10:],
+        "reason": reason,
+    }
+
+
+def get_unread_summary_for_nudge(
+    conn: sqlite3.Connection, *, board_id: str, principal_id: str, read_seq: int
+) -> tuple[int, list[str], bool]:
+    details = get_nudge_unread_details(
+        conn,
+        board_id=board_id,
+        principal_id=principal_id,
+        read_seq=read_seq,
+    )
+    return int(details["unread_count"]), list(details["types"]), bool(details["mentioned"])
 
 
 def prune_outbox_before(conn: sqlite3.Connection, cutoff_iso: str) -> int:

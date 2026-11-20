@@ -285,20 +285,28 @@ def _build_prompt(
     types: list[str],
     mentioned: bool,
     source: str,
+    trigger_seqs: list[int] | None = None,
+    trigger_threads: list[str] | None = None,
 ) -> str:
     type_str = ", ".join(types) if types else "unknown"
-    mention_note = f" You were directly @mentioned (`@{handle}`)." if mentioned else ""
+    mention_note = f" You were directly addressed in `to` (`@{handle}`)." if mentioned else ""
+    trigger_note = ""
+    if trigger_seqs:
+        seq_str = ", ".join(f"#{s}" for s in trigger_seqs)
+        thread_str = f" in [{', '.join(trigger_threads)}]" if trigger_threads else ""
+        trigger_note = f" Triggered by {seq_str}{thread_str}."
     mcp_name = f"agent-board-{handle}" if (_profiles_dir_path() / f"{handle}.toml").exists() else "agent-board"
     cli_path = _resolve_board_cli(handle)
 
     return (
         f"Agent Board notification ({source}) for `@{handle}` on board `{board}` "
-        f"(latest_seq={latest_seq}, unread={unread_count}, types=[{type_str}]).{mention_note}\n\n"
+        f"(latest_seq={latest_seq}, unread={unread_count}, types=[{type_str}]).{mention_note}{trigger_note}\n\n"
         f"Please inspect and respond using the `{mcp_name}` MCP server or `{cli_path}` CLI:\n"
         f"1. Read unread messages: `read_messages(board='{board}')` or `{cli_path} read {board}`.\n"
         f"2. Check the brief if needed: `get_brief(board='{board}')` or `{cli_path} brief {board}`.\n"
         f"3. Handle any assigned tasks, questions, issues, or retest reports and post replies "
-        f"with `post_message` / `{cli_path} post`.\n"
+        f"with `post_message` / `{cli_path} post` (use `to` for recipients who should wake, "
+        f"`cc` for FYI-only without waking, or `to=[]` for quiet closures).\n"
         f"4. Acknowledge your cursor when finished: `ack(board='{board}', read_seq={latest_seq})` "
         f"or `{cli_path} ack {board} {latest_seq}`."
     )
@@ -340,6 +348,8 @@ def _dispatch_to_agentapi(state: ListenerState, item: dict[str, Any]) -> None:
         types=[str(t) for t in item.get("types", [])],
         mentioned=bool(item.get("mentioned", False)),
         source=str(item.get("source", "webhook")),
+        trigger_seqs=[int(s) for s in (item.get("trigger_seqs") or [])],
+        trigger_threads=[str(t) for t in (item.get("trigger_threads") or [])],
     )
 
     cmd = [agentapi_bin, "send-message", f"--title={title}", conv_id, prompt]
@@ -410,10 +420,11 @@ def _recover_one_board(
     for m in messages:
         if str(m.get("author_handle", "")).strip().lower() == handle:
             continue
-        mentions = [str(x).strip().lower() for x in (m.get("mentions") or [])]
+        raw_to = m.get("to") if "to" in m else (m.get("mentions") or [])
+        to_list = [str(x).strip().lower() for x in (raw_to or [])]
         mtype = str(m.get("type", "")).strip()
-        if mentions:
-            if handle in mentions:
+        if to_list:
+            if handle in to_list:
                 matching.append(m)
         else:
             if not mentions_only and mtype in allowed_types:
@@ -422,6 +433,12 @@ def _recover_one_board(
         return
 
     max_seq = max(int(m["seq"]) for m in matching)
+    trigger_seqs = [int(m["seq"]) for m in matching][-20:]
+    seen_threads: list[str] = []
+    for m in matching:
+        title = str(m.get("thread_title") or "").strip()
+        if title and title not in seen_threads:
+            seen_threads.append(title)
     catchup_id = f"catchup-{slug}-{handle}-{max_seq}"
     if state.should_enqueue(slug, handle, max_seq, catchup_id):
         work_q.put(
@@ -432,7 +449,13 @@ def _recover_one_board(
                 "latest_seq": max_seq,
                 "unread_for_you": len(matching),
                 "types": sorted({str(m["type"]) for m in matching}),
-                "mentioned": any(handle in [str(x).lower() for x in m.get("mentions", [])] for m in matching),
+                "mentioned": any(
+                    handle
+                    in [str(x).strip().lower() for x in ((m.get("to") if "to" in m else m.get("mentions")) or [])]
+                    for m in matching
+                ),
+                "trigger_seqs": trigger_seqs,
+                "trigger_threads": seen_threads[-10:],
                 "nudge_id": catchup_id,
                 "source": "wake-recovery",
             }

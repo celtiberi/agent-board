@@ -228,3 +228,89 @@ def test_mentions_ignore_inline_and_fenced_code_spans(env: BoardTestEnv) -> None
         body_md="Example `@all` ignored, real mention @bob kept.",
     )
     assert real_mention["mentions"] == ["bob"]
+
+
+def test_explicit_to_cc_silent_envelope_and_leading_fallback(env: BoardTestEnv) -> None:
+    # 1. Explicit to + cc overrides body @viewer/@mac-dev-ai and deduplicates to > cc.
+    env_msg = messages_svc.post_message(
+        env.services,
+        env.owner_ctx,
+        board_slug="alpha",
+        msg_type="task",
+        body_md="Please verify PR while @viewer and @mac-dev-ai finish docs.",
+        to=["bob"],
+        cc=["mac-dev-ai", "bob"],
+    )
+    assert env_msg["to"] == ["bob"]
+    assert env_msg["mentions"] == ["bob"]
+    assert env_msg["cc"] == ["mac-dev-ai"]
+
+    # 2. Explicit to=[] (even with actionable type and @bob in prose) queues zero outbox nudges.
+    from agent_board.services import delivery as delivery_svc
+
+    delivery_svc.create_subscription(
+        env.services,
+        env.bob_ctx,
+        url="https://hooks.example.test/bob",
+        boards=["alpha"],
+        min_interval_s=0,
+        debounce_s=0,
+    )
+    silent = messages_svc.post_message(
+        env.services,
+        env.dev_ctx,
+        board_slug="alpha",
+        msg_type="status",
+        body_md="Thanks @bob, noted!",
+        to=[],
+        cc=["bob"],
+    )
+    assert silent["to"] == []
+    assert silent["cc"] == ["bob"]
+    pending = (
+        env.services.db.read_conn()
+        .execute("SELECT COUNT(*) AS cnt FROM outbox WHERE status = 'pending' AND latest_seq = ?", (silent["seq"],))
+        .fetchone()
+    )
+    assert pending["cnt"] == 0
+
+    # 3. Unknown recipient in explicit to/cc raises ValidationError naming valid handles.
+    with pytest.raises(ValidationError, match="bob"):
+        messages_svc.post_message(
+            env.services,
+            env.owner_ctx,
+            board_slug="alpha",
+            msg_type="note",
+            body_md="Test",
+            to=["ghost-handle"],
+        )
+
+    # 4. Legacy mode (to=None): paragraph-leading @bob ignores incidental mid-body @mac-dev-ai.
+    lead_single = messages_svc.post_message(
+        env.services,
+        env.owner_ctx,
+        board_slug="alpha",
+        msg_type="note",
+        body_md="@bob thanks, applied @mac-dev-ai's accuracy fixes.",
+    )
+    assert lead_single["to"] == ["bob"]
+
+    # Multi-paragraph handoff wakes both leading handles.
+    multi_para = messages_svc.post_message(
+        env.services,
+        env.owner_ctx,
+        board_slug="alpha",
+        msg_type="note",
+        body_md="@bob check PR #1.\n\n@mac-dev-ai rebase branch.",
+    )
+    assert multi_para["to"] == ["bob", "mac-dev-ai"]
+
+    # Prose without leading @ falls back to code-stripped body mentions.
+    prose_fallback = messages_svc.post_message(
+        env.services,
+        env.owner_ctx,
+        board_slug="alpha",
+        msg_type="note",
+        body_md="Syncing @bob and @mac-dev-ai on release.",
+    )
+    assert prose_fallback["to"] == ["bob", "mac-dev-ai"]

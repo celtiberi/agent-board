@@ -114,11 +114,18 @@ def test_recover_one_board_filters_mentions_notes_and_self(tmp_path: Path, monke
 
         return httpx.MockTransport(_handler)
 
-    # 1. mentions_only=True ignores unmentioned tasks and self messages, picks up @dev-agent mention.
+    # 1. mentions_only=True ignores unmentioned/cc-only tasks and self messages, picks up explicit to=['dev-agent'].
     msgs_1 = [
-        {"seq": 10, "author_handle": "dev-agent", "type": "task", "mentions": ["other"]},
-        {"seq": 11, "author_handle": "owner", "type": "task", "mentions": []},
-        {"seq": 12, "author_handle": "owner", "type": "note", "mentions": ["dev-agent"]},
+        {"seq": 10, "author_handle": "dev-agent", "type": "task", "to": ["other"], "mentions": ["other"]},
+        {"seq": 11, "author_handle": "owner", "type": "task", "to": [], "cc": ["dev-agent"], "mentions": []},
+        {
+            "seq": 12,
+            "author_handle": "owner",
+            "type": "note",
+            "thread_title": "website-docs",
+            "to": ["dev-agent"],
+            "mentions": ["dev-agent"],
+        },
     ]
     q1: queue.Queue[dict[str, object] | None] = queue.Queue()
     with httpx.Client(base_url="http://board.test/api/v1", transport=_mock_transport(msgs_1)) as c:
@@ -136,6 +143,8 @@ def test_recover_one_board_filters_mentions_notes_and_self(tmp_path: Path, monke
     assert item1 is not None
     assert item1["latest_seq"] == 12
     assert item1["mentioned"] is True
+    assert item1["trigger_seqs"] == [12]
+    assert item1["trigger_threads"] == ["website-docs"]
 
     # 2. mentions_only=False ignores plain unmentioned notes, picks up unmentioned actionable types.
     state.mark_dispatched("alpha", "dev-agent", 12, "catchup-alpha-dev-agent-12")
@@ -274,6 +283,9 @@ def test_sidecar_binary_resolution_uses_env_and_home_fallbacks(
         types=["task"],
         mentioned=True,
         source="webhook",
+        trigger_seqs=[108, 110],
+        trigger_threads=["website-docs"],
     )
     assert "agent-board-qa-bot" in prompt
     assert str(wrapper) in prompt
+    assert "Triggered by #108, #110 in [website-docs]" in prompt

@@ -146,6 +146,9 @@ def create_web_router() -> APIRouter:
         thread_title: str = Form(default=""),
         type: str = Form(default="note"),
         target_handle: str = Form(default=""),
+        to_handles: str = Form(default=""),
+        cc_handles: str = Form(default=""),
+        silent: bool = Form(default=False),
         reply_to_id: str = Form(default=""),
         body_md: str = Form(...),
         attachment: UploadFile | None = File(default=None),
@@ -176,6 +179,15 @@ def create_web_router() -> APIRouter:
         elif type == "question" and target_handle.strip():
             data = {"for": target_handle.strip().lower()}
 
+        parsed_to: list[str] | None
+        if silent:
+            parsed_to = []
+        elif to_handles.strip():
+            parsed_to = [h.strip() for h in to_handles.split(",") if h.strip()]
+        else:
+            parsed_to = None
+        parsed_cc = [h.strip() for h in cc_handles.split(",") if h.strip()] if cc_handles.strip() else None
+
         msg = messages_svc.post_message(
             services,
             ctx,
@@ -184,6 +196,8 @@ def create_web_router() -> APIRouter:
             body_md=body_md,
             thread_id=thread_id.strip() or None,
             thread_title=thread_title.strip() or None,
+            to=parsed_to,
+            cc=parsed_cc,
             data=data,
             reply_to_id=reply_to_id.strip() or None,
             attachment_ids=att_ids or None,

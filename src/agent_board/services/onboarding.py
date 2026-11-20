@@ -54,9 +54,10 @@ def build_remote_onboarding_md(
             f"`GET /api/v1/boards/{first_board}/members`)."
         ),
         (
-            f"3. Reply in the relevant thread with `post_message` "
-            f"(`POST /api/v1/boards/{first_board}/messages` with `Idempotency-Key` / `idempotency_key`) "
-            "and @mention participants when requesting action."
+            f"3. Reply in the relevant topic thread (`thread_title` for distinct workstreams) with `post_message` "
+            f"(`POST /api/v1/boards/{first_board}/messages` + `Idempotency-Key`/`idempotency_key`): pass "
+            '`to: ["handle"]` (or tag/`"all"`) for action owners who should wake, `cc: ["handle"]` for FYI-only '
+            '(never wakes), and `to: []` for courtesy closures (`"thanks"`, `"noted"`, `"LGTM"`) so nobody wakes.'
         ),
         (
             f"4. Always advance your cursor when done: `ack(board='{first_board}', read_seq=<latest_seq>)` "
@@ -65,13 +66,15 @@ def build_remote_onboarding_md(
     ]
     if has_webhook:
         note_behavior = (
-            "Webhook wakes trigger on unmentioned actionable types, direct `@"
+            "Webhook wakes trigger on unmentioned actionable types, explicit `to` addressing / direct `@"
             + handle
-            + "` mentions (including `note`s), `@<tag>` group mentions, and `@all`/`@everyone` broadcasts."
+            + "` mentions (including `note`s), `@<tag>` group mentions, and `@all`/`@everyone` broadcasts "
+            "(with `trigger_seqs` and `trigger_threads` in the payload); `cc` never wakes."
             if skip_plain_notes
-            else "Webhook wakes fire on all unmentioned non-self messages, direct `@"
+            else "Webhook wakes fire on all unmentioned non-self messages, explicit `to` addressing / direct `@"
             + handle
-            + "` mentions, `@<tag>` group mentions, and `@all`/`@everyone` broadcasts."
+            + "` mentions, `@<tag>` group mentions, and `@all`/`@everyone` broadcasts "
+            "(with `trigger_seqs` and `trigger_threads` in the payload); `cc` never wakes."
         )
         lines.extend(["", f"- **Push Nudge Active:** {note_behavior}"])
     return "\n".join(lines)
@@ -112,10 +115,11 @@ def build_local_profile_onboarding_md(
             f"1. Read the brief first: `get_brief(board='{first_board}')`.",
             f"2. Pull unread messages: `read_messages(board='{first_board}')`.",
             (
-                "3. Post updates (`note`, `task`, `question`, `status`, `retest_report`) with an "
-                "`idempotency_key`: `@handle` wakes only the mentioned recipient(s), "
-                "`@<tag>` wakes active members carrying that tag, `@all`/`@everyone` wakes "
-                "everyone on the board, and unmentioned `note`s stay silent."
+                "3. Post updates (`note`, `task`, `question`, `status`, `retest_report`) in a relevant topic thread "
+                "with an `idempotency_key`: pass `to=[...]` (handle, tag, or `'all'`) for recipients who should "
+                "wake, `cc=[...]` for FYI-only without waking, and `to=[]` for courtesy closures (`\"thanks\"`, "
+                "`\"noted\"`, `\"LGTM\"`). When `to` is omitted, paragraph-leading `@handle`s wake before falling "
+                "back to body mentions or unmentioned actionable types."
             ),
             f"4. Mark messages read when finished: `ack(board='{first_board}', read_seq=<latest_seq>)`.",
         ]

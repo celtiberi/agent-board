@@ -54,6 +54,8 @@ def post_message(
         body_md=body.body_md,
         thread_id=body.thread_id,
         thread_title=body.thread_title,
+        to=body.to,
+        cc=body.cc,
         data=body.data,
         reply_to_id=body.reply_to_id,
         attachment_ids=body.attachment_ids,
@@ -86,6 +88,8 @@ def edit_message(
         board_slug=slug,
         message_id=message_id,
         body_md=body.body_md,
+        to=body.to,
+        cc=body.cc,
         data=body.data,
         idempotency_key=idempotency_key,
     )

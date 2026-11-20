@@ -6,11 +6,22 @@ import sqlite3
 
 
 def get_cursor(conn: sqlite3.Connection, principal_id: str, board_id: str) -> int:
-    row = conn.execute(
-        "SELECT read_seq FROM cursors WHERE principal_id = ? AND board_id = ?",
+    row = get_cursor_row(conn, principal_id, board_id)
+    return int(row["read_seq"]) if row else 0
+
+
+def get_cursor_row(conn: sqlite3.Connection, principal_id: str, board_id: str) -> sqlite3.Row | None:
+    return conn.execute(
+        "SELECT read_seq, updated_at FROM cursors WHERE principal_id = ? AND board_id = ?",
         (principal_id, board_id),
     ).fetchone()
-    return int(row["read_seq"]) if row else 0
+
+
+def list_cursors_for_board(conn: sqlite3.Connection, board_id: str) -> list[sqlite3.Row]:
+    return conn.execute(
+        "SELECT principal_id, read_seq, updated_at FROM cursors WHERE board_id = ?",
+        (board_id,),
+    ).fetchall()
 
 
 def upsert_cursor(
@@ -152,6 +163,21 @@ def list_active_subscriptions_for_board(conn: sqlite3.Connection, board_id: str)
                   WHERE m.board_id = ? AND m.principal_id = s.principal_id
               )
           )
+        """,
+        (board_id,),
+    ).fetchall()
+
+
+def list_subscriptions_for_board_members(conn: sqlite3.Connection, board_id: str) -> list[sqlite3.Row]:
+    """Return non-secret subscription status fields for principals enrolled on a board."""
+    return conn.execute(
+        """
+        SELECT s.id, s.principal_id, s.boards, s.active, s.failure_count, s.disabled_reason, s.last_sent_at
+        FROM subscriptions s
+        WHERE EXISTS (
+            SELECT 1 FROM memberships m
+            WHERE m.board_id = ? AND m.principal_id = s.principal_id
+        )
         """,
         (board_id,),
     ).fetchall()

@@ -79,8 +79,19 @@ def test_deterministic_command_parser_grammar_and_hard_refusals() -> None:
     assert parse_deterministic_commands("@board-admin help", bot_handle="board-admin") == [{"action": "help"}]
     assert parse_deterministic_commands("@board-admin status", bot_handle="board-admin") == [{"action": "status"}]
     assert parse_deterministic_commands("list boards") == [{"action": "list_boards"}]
+    assert parse_deterministic_commands("list members") == [{"action": "list_members"}]
     assert parse_deterministic_commands("list members alpha") == [{"action": "list_members", "board_slug": "alpha"}]
     assert parse_deterministic_commands("webhooks") == [{"action": "list_webhooks"}]
+    assert parse_deterministic_commands("list webhooks alpha") == [{"action": "list_webhooks", "board_slug": "alpha"}]
+    assert parse_deterministic_commands("check webhook @dev-agent") == [
+        {"action": "list_webhooks", "target_handle": "dev-agent"}
+    ]
+    assert parse_deterministic_commands("check @dev-agent on alpha") == [
+        {"action": "list_webhooks", "target_handle": "dev-agent", "board_slug": "alpha"}
+    ]
+    assert parse_deterministic_commands("webhooks @dev-agent in alpha") == [
+        {"action": "list_webhooks", "target_handle": "dev-agent", "board_slug": "alpha"}
+    ]
     assert parse_deterministic_commands("heal webhooks") == [{"action": "enable_webhooks"}]
     assert parse_deterministic_commands("enable webhook 01ABC") == [
         {"action": "enable_webhooks", "subscription_id": "01ABC"}
@@ -380,6 +391,7 @@ def test_admin_bot_ignores_incidental_and_code_quoted_mentions(env, tmp_path: Pa
         "FYI: former `@admin` -> `@tool-master`. Mention `@board-admin`.",
         "FYI: for board tasks, mention @board-admin.",
         "@bob please ask @board-admin for help",
+        "- @board-admin handles board operations",
         "> @board-admin status",
         "```\n@board-admin status\n```",
         "`@board-admin` status",
@@ -439,5 +451,134 @@ def test_admin_bot_reports_ollama_errors_distinctly(env, tmp_path: Path) -> None
         assert "Local intent parser error" in bot_replies[0]
         assert "timed out" in bot_replies[0]
         assert "Unrecognized command" not in bot_replies[0]
+    finally:
+        ollama.close()
+
+
+def test_admin_bot_paragraph_addressing_backup_count_and_peer_health(env, tmp_path: Path) -> None:
+    seen_prompts: list[str] = []
+
+    def _ollama_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/tags":
+            return httpx.Response(200, json={"models": [{"name": "gemma4:12b"}]})
+        if request.url.path == "/api/chat":
+            body = json.loads(request.content.decode("utf-8"))
+            seen_prompts.append(body["messages"][1]["content"])
+            return httpx.Response(
+                200,
+                json={
+                    "message": {
+                        "content": json.dumps(
+                            {
+                                "actions": [
+                                    {"action": "list_webhooks", "target_handle": "dev-agent"},
+                                ]
+                            }
+                        )
+                    }
+                },
+            )
+        return httpx.Response(404)
+
+    ollama = OllamaIntentParser("http://ollama.test", "gemma4:12b", transport=httpx.MockTransport(_ollama_handler))
+    try:
+        _, cfg, _, bot_client, _ = _setup_bot(env, tmp_path, ollama=ollama)
+        set_membership(env.services, env.owner_ctx, board_slug="alpha", principal_handle="dev-agent", role="agent")
+        dev_tok = create_token(
+            env.services, env.owner_ctx, principal_handle="dev-agent", name="dev", board_scope=["*"], max_role="agent"
+        )["token"]
+        from agent_board.services.auth import authenticate_bearer
+
+        dev_ctx = authenticate_bearer(env.services, dev_tok)
+
+        dev_sub = delivery_svc.create_subscription(
+            env.services,
+            env.owner_ctx,
+            url="https://hooks.example.test/dev-private-url",
+            boards=["*"],
+            principal_handle="dev-agent",
+        )
+        with env.services.db.write_tx() as conn:
+            conn.execute(
+                "UPDATE subscriptions SET last_sent_at = ? WHERE id = ?",
+                ("2026-11-20T15:12:52Z", dev_sub["id"]),
+            )
+        messages_svc.post_message(
+            env.services, env.bob_ctx, board_slug="alpha", msg_type="note", body_md="hello team"
+        )
+        delivery_svc.ack_cursor(env.services, dev_ctx, board_slug="alpha", read_seq=1)
+
+        from agent_board.backup.manager import run_backup
+
+        backup_res = run_backup(env.services)
+        assert backup_res["ok"] is True
+
+        # 1. Owner status reports actual backup runs from `runs` + `latest`.
+        messages_svc.post_message(
+            env.services,
+            env.owner_ctx,
+            board_slug="alpha",
+            msg_type="question",
+            body_md="@board-admin status",
+        )
+        # 2. Paragraph-2 addressing (deterministic check webhook).
+        messages_svc.post_message(
+            env.services,
+            env.bob_ctx,
+            board_slug="alpha",
+            msg_type="question",
+            body_md=(
+                "@dev-agent Could you check item #1 when free?\n\n"
+                "@board-admin check webhook @dev-agent on alpha"
+            ),
+        )
+        # 3. Paragraph-2 addressing with Ollama NL fallback + omitted board_slug defaulting to current board.
+        messages_svc.post_message(
+            env.services,
+            env.bob_ctx,
+            board_slug="alpha",
+            msg_type="question",
+            body_md=(
+                "@dev-agent Ping on status.\n\n"
+                "@board-admin @dev-agent has been quiet for hours, is its delivery working?"
+            ),
+        )
+        # 4. Member listing current board without repeating slug, plus cross-board refusal.
+        messages_svc.post_message(
+            env.services,
+            env.bob_ctx,
+            board_slug="alpha",
+            msg_type="question",
+            body_md="@board-admin list members",
+        )
+        messages_svc.post_message(
+            env.services,
+            env.bob_ctx,
+            board_slug="alpha",
+            msg_type="question",
+            body_md="@board-admin check webhook @admin on secret-proj",
+        )
+
+        assert run_once(cfg, board_client=bot_client, ollama_parser=ollama) == 5
+        assert len(seen_prompts) == 1
+        assert "Current board: alpha" in seen_prompts[0]
+        assert "Ping on status." not in seen_prompts[0]
+
+        replies = [
+            m["body_md"]
+            for m in bot_client.read_messages("alpha", since_seq=0)["messages"]
+            if m["author_handle"] == "board-admin"
+        ]
+        assert len(replies) == 5
+        assert any("1 recent successful run(s)" in r and "(latest:" in r for r in replies)
+        peer_replies = [r for r in replies if "**Member Health on `alpha`**" in r]
+        assert len(peer_replies) == 2
+        for pr in peer_replies:
+            assert "read_seq 1/" in pr
+            assert "active (failures=0, last_sent=2026-11-20T15:12:52Z)" in pr
+            assert "hooks.example.test" not in pr
+            assert dev_sub["id"] not in pr
+        assert any("**Members on `alpha`**" in r and "`dev-agent`" in r for r in replies)
+        assert any("Refused: you are not a member of `secret-proj`." in r for r in replies)
     finally:
         ollama.close()

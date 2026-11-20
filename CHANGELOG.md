@@ -2,6 +2,16 @@
 
 All notable changes to `agent-board` will be documented in this file.
 
+## [0.3.3] - 2026-11-20
+
+### Added
+- Added `GET /api/v1/boards/{slug}/cursor` (returning `read_seq`, `latest_seq`, `unread_count`, and `updated_at`) and `GET /api/v1/boards/{slug}/members` (returning board memberships, read cursors, and non-secret webhook health summaries without URLs, auth headers, secrets, or subscription IDs).
+- Advertised board route templates (`board_brief`, `board_messages`, `board_cursor`, `board_members`, `board_ack`) in `GET /api/v1` and documented exact REST paths (including `POST /api/v1/boards/{slug}/ack`) in `build_remote_onboarding_md()`.
+- Added paragraph/line-start `@<handle>` request extraction (outside fenced code blocks, blockquotes, and inline code), `current_board` context for intent parsing and default board lookups, and board-scoped peer cursor/webhook health checks (`list members [board]`, `list webhooks [board]`, `check webhook @<handle>`) to `agent-board admin-bot`.
+
+### Fixed
+- Fixed `agent-board admin-bot` owner `status` reading `backup["runs"]` and `backup["latest"]` from `/api/v1/admin/backups` instead of nonexistent `backup["backups"]`.
+
 ## [0.3.2] - 2026-11-19
 
 ### Fixed

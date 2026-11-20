@@ -27,6 +27,7 @@ logger = logging.getLogger("agent_board_admin_bot")
 
 _MENTION_RE = re.compile(r"(?<![A-Za-z0-9_.-])@([a-z0-9][a-z0-9_-]{0,48}[a-z0-9]?)")
 _SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,47}[a-z0-9]?$")
+_FENCE_RE = re.compile(r"^\s*(`{3,}|~{3,})(.*)$")
 
 _FORBIDDEN_RE = re.compile(
     r"(?is)"
@@ -125,7 +126,7 @@ def _strip_handle_prefix(text: str, bot_handle: str | None) -> str:
 
 
 def _clean_handle(raw: str) -> str:
-    return raw.strip().lstrip("@").rstrip(",.;:").lower()
+    return raw.strip().strip("`'\"").lstrip("@").rstrip(",.;:`'\"").lower()
 
 
 def _clean_slug(raw: str) -> str:
@@ -278,9 +279,39 @@ def parse_deterministic_commands(text: str, *, bot_handle: str | None = None) ->
     if lower in ("backup", "run backup", "run-backup"):
         return [{"action": "run_backup"}]
 
-    m_members = re.match(r"^(?:list[\s-]+members|members)\s+([a-z0-9][a-z0-9-]*)$", lower)
+    m_members = re.match(r"^(?:list[\s-]+members|members)(?:\s+([a-z0-9][a-z0-9-]*))?$", lower)
     if m_members:
-        return [{"action": "list_members", "board_slug": m_members.group(1)}]
+        action: dict[str, Any] = {"action": "list_members"}
+        if m_members.group(1):
+            action["board_slug"] = m_members.group(1)
+        return [action]
+
+    m_check_peer = (
+        re.match(
+            r"^(?:check|inspect)\s+webhooks?\s+@?([a-z0-9][a-z0-9_-]*)(?:\s+(?:on|in)\s+([a-z0-9][a-z0-9-]*))?$",
+            lower,
+        )
+        or re.match(
+            r"^(?:check|inspect)\s+@([a-z0-9][a-z0-9_-]*)(?:\s+webhooks?)?(?:\s+(?:on|in)\s+([a-z0-9][a-z0-9-]*))?$",
+            lower,
+        )
+        or re.match(
+            r"^webhooks?\s+@([a-z0-9][a-z0-9_-]*)(?:\s+(?:on|in)\s+([a-z0-9][a-z0-9-]*))?$",
+            lower,
+        )
+    )
+    if m_check_peer:
+        action = {"action": "list_webhooks", "target_handle": m_check_peer.group(1)}
+        if m_check_peer.group(2):
+            action["board_slug"] = m_check_peer.group(2)
+        return [action]
+
+    m_board_webhooks = re.match(
+        r"^(?:list[\s-]+webhooks|webhooks?|list[\s-]+subscriptions|subscriptions)\s+(?:on\s+|in\s+)?([a-z0-9][a-z0-9-]*)$",
+        lower,
+    )
+    if m_board_webhooks:
+        return [{"action": "list_webhooks", "board_slug": m_board_webhooks.group(1)}]
 
     m_enable = re.match(r"^(?:enable[\s-]+webhook|heal[\s-]+webhook)\s+([A-Za-z0-9]+)$", cleaned.strip(), re.I)
     if m_enable:
@@ -405,12 +436,20 @@ class OllamaIntentParser:
             return True, f"ready ({self.model})"
         return False, f"model '{self.model}' not loaded"
 
-    def parse(self, *, requester: str, request_text: str, visible_boards: list[str]) -> list[dict[str, Any]]:
+    def parse(
+        self,
+        *,
+        requester: str,
+        request_text: str,
+        visible_boards: list[str],
+        current_board: str | None = None,
+    ) -> list[dict[str, Any]]:
         spec = self.prompts["intent_parse"]
         opts = dict(spec.get("options") or {})
         think = opts.pop("think", False)
         user_msg = str(spec["user_template"]).format(
             requester=requester,
+            current_board=current_board or "(none)",
             boards=", ".join(visible_boards) if visible_boards else "(none)",
             request_text=request_text,
         )
@@ -483,6 +522,9 @@ class AdminBotClient:
 
     def list_boards(self) -> list[dict[str, Any]]:
         return list(self._json(self._client.get("/boards")).get("boards", []))
+
+    def list_board_members(self, board_slug: str) -> dict[str, Any]:
+        return self._json(self._client.get(f"/boards/{board_slug}/members"))
 
     def read_messages(self, board_slug: str, *, since_seq: int | None = None, limit: int = 100) -> dict[str, Any]:
         params: dict[str, Any] = {"limit": limit}
@@ -565,6 +607,40 @@ class AdminBotClient:
         return self._json(self._client.post("/admin/backups/run"))
 
 
+def _format_member_health_line(member: dict[str, Any], latest_seq: int) -> str:
+    """Render one non-secret board member status line with cursor and webhook summary."""
+    tags = member.get("tags") or []
+    tag_str = f" [{', '.join(tags)}]" if tags else ""
+    read_seq = int(member.get("read_seq", 0))
+    ack_at = member.get("cursor_updated_at")
+    ack_part = f" (acked {ack_at})" if ack_at else " (never acked)"
+
+    wh = member.get("webhook") or {}
+    sub_count = int(wh.get("subscription_count", 0))
+    if sub_count == 0:
+        wh_part = "none"
+    else:
+        active_count = int(wh.get("active_count", 0))
+        disabled_count = int(wh.get("disabled_count", 0))
+        failures = int(wh.get("failure_count", 0))
+        last_sent = wh.get("last_sent_at") or "never"
+        if disabled_count > 0 and active_count == 0:
+            reasons = wh.get("disabled_reasons") or ["unknown"]
+            wh_part = f"DISABLED ({', '.join(reasons)}, failures={failures}, last_sent={last_sent})"
+        elif disabled_count > 0:
+            wh_part = (
+                f"partial ({active_count} active, {disabled_count} disabled, "
+                f"failures={failures}, last_sent={last_sent})"
+            )
+        else:
+            wh_part = f"active (failures={failures}, last_sent={last_sent})"
+
+    return (
+        f"- `{member['handle']}` ({member['role']}){tag_str} — "
+        f"read_seq {read_seq}/{latest_seq}{ack_part}, webhook: {wh_part}"
+    )
+
+
 class AdminBotProcessor:
     """Enforces caller policy and executes allowlisted Agent Board admin operations."""
 
@@ -583,8 +659,49 @@ class AdminBotProcessor:
             re.IGNORECASE,
         )
 
+    def _extract_addressed_text(self, body_md: str) -> str | None:
+        """Return the first message- or paragraph-start @<handle> request outside code fences and blockquotes."""
+        fence_char: str | None = None
+        fence_len = 0
+        collecting = False
+        collected: list[str] = []
+
+        for line in (body_md or "").splitlines():
+            stripped = line.lstrip()
+            fence_m = _FENCE_RE.match(stripped)
+            if fence_char is not None:
+                if fence_m and fence_m.group(1)[0] == fence_char and len(fence_m.group(1)) >= fence_len:
+                    if not fence_m.group(2).strip():
+                        fence_char = None
+                        fence_len = 0
+                continue
+
+            if fence_m:
+                if collecting:
+                    break
+                fence_char = fence_m.group(1)[0]
+                fence_len = len(fence_m.group(1))
+                continue
+
+            if stripped.startswith(">"):
+                if collecting:
+                    break
+                continue
+
+            if not collecting:
+                if self._direct_mention_re.match(line):
+                    collecting = True
+                    collected.append(line)
+            else:
+                if not line.strip():
+                    break
+                collected.append(line)
+
+        text = "\n".join(collected).strip()
+        return text or None
+
     def _is_directly_addressed(self, body_md: str) -> bool:
-        return bool(self._direct_mention_re.match(body_md or ""))
+        return self._extract_addressed_text(body_md) is not None
 
     def _reply(self, board_slug: str, msg: dict[str, Any], text: str) -> dict[str, Any]:
         author = _clean_handle(str(msg.get("author_handle", "")))
@@ -616,7 +733,7 @@ class AdminBotProcessor:
     def _format_help(self, tier: str) -> str:
         lines = [
             f"Allowlisted commands for `{tier}` callers:",
-            "- `status`, `list boards`, `list members <board>`, `list webhooks`",
+            "- `status`, `list boards`, `list members [board]`, `list webhooks [board]`, `check webhook @<handle>`",
         ]
         if tier in ("owner", "trusted"):
             lines.append("- `create board <slug> --name \"<Name>\" --purpose \"<Purpose>\" [--add <handle1,handle2>]`")
@@ -641,6 +758,7 @@ class AdminBotProcessor:
         memberships: list[dict[str, Any]],
         caller_boards: set[str],
         newly_created_boards: set[str],
+        current_board: str = "",
     ) -> str:
         kind = str(action.get("action", "unknown")).strip().lower()
         if kind == "help":
@@ -663,6 +781,16 @@ class AdminBotProcessor:
             if tier == "owner":
                 disabled_subs = [s["id"] for s in all_subs if not s.get("active", True)]
                 backup = self.board.backup_status()
+                runs = backup.get("runs") or []
+                ok_runs = [r for r in runs if r.get("ok")]
+                latest = backup.get("latest")
+                if isinstance(latest, dict) and latest.get("finished_at"):
+                    backup_line = (
+                        f"- Backups: {len(ok_runs)} recent successful run(s) "
+                        f"(latest: {latest['finished_at']})"
+                    )
+                else:
+                    backup_line = f"- Backups: {len(ok_runs)} recent successful run(s)"
                 ollama_note = "disabled"
                 if self.ollama is not None:
                     _, ollama_note = self.ollama.health_check()
@@ -671,7 +799,7 @@ class AdminBotProcessor:
                     f"- Active boards: {len([b for b in all_boards if b.get('archived_at') is None])}\n"
                     f"- Subscriptions: {len(all_subs)} total ({len(disabled_subs)} disabled)\n"
                     f"- Ollama intent parser: {ollama_note}\n"
-                    f"- Backups: {len(backup.get('backups', []))} on disk"
+                    f"{backup_line}"
                 )
             if tier == "trusted":
                 visible_boards = sorted(caller_boards)
@@ -703,39 +831,79 @@ class AdminBotProcessor:
             return "**Boards**\n" + "\n".join(rows)
 
         if kind == "list_members":
-            slug = _clean_slug(str(action.get("board_slug", "")))
+            slug = _clean_slug(str(action.get("board_slug", ""))) or _clean_slug(current_board)
             if not slug:
                 return "Specify a board slug (for example: `list members my-project`)."
             if tier != "owner" and slug not in caller_boards:
                 return f"Refused: you are not a member of `{slug}`."
-            rows = [m for m in memberships if str(m.get("board_slug", "")).lower() == slug]
-            if not rows:
+            try:
+                data = self.board.list_board_members(slug)
+            except RuntimeError as exc:
+                if "HTTP 404" in str(exc):
+                    return f"No members found on `{slug}` (or board does not exist)."
+                raise
+            members = list(data.get("members") or [])
+            if not members:
                 return f"No members found on `{slug}` (or board does not exist)."
-            parts = []
-            for m in rows:
-                p = principals_by_handle.get(str(m["principal_handle"]).lower(), {})
-                tags = p.get("tags") or []
-                tag_str = f" [{', '.join(tags)}]" if tags else ""
-                parts.append(f"- `{m['principal_handle']}` ({m['role']}){tag_str}")
-            return f"**Members on `{slug}`**\n" + "\n".join(parts)
+            latest_seq = int(data.get("latest_seq", 0))
+            parts = [_format_member_health_line(m, latest_seq) for m in members]
+            return f"**Members on `{slug}`** (latest_seq={latest_seq})\n" + "\n".join(parts)
 
         if kind == "list_webhooks":
+            target_h = _clean_handle(str(action.get("target_handle", "")))
+            slug = _clean_slug(str(action.get("board_slug", "")))
+            if target_h or slug:
+                board = slug or _clean_slug(current_board)
+                if not board:
+                    return "Specify a board slug (for example: `list webhooks my-project`)."
+                if tier != "owner" and board not in caller_boards:
+                    return f"Refused: you are not a member of `{board}`."
+                try:
+                    data = self.board.list_board_members(board)
+                except RuntimeError as exc:
+                    if "HTTP 404" in str(exc):
+                        return f"Board `{board}` was not found."
+                    raise
+                members = list(data.get("members") or [])
+                latest_seq = int(data.get("latest_seq", 0))
+                if target_h:
+                    match = next((m for m in members if str(m.get("handle", "")).lower() == target_h), None)
+                    if match is None:
+                        return f"Member `{target_h}` was not found on `{board}`."
+                    return (
+                        f"**Member Health on `{board}`** (latest_seq={latest_seq})\n"
+                        + _format_member_health_line(match, latest_seq)
+                    )
+                if not members:
+                    return f"No members found on `{board}`."
+                parts = [_format_member_health_line(m, latest_seq) for m in members]
+                return f"**Webhook & Cursor Health on `{board}`** (latest_seq={latest_seq})\n" + "\n".join(parts)
+
             subs = self.board.list_subscriptions()
             visible = (
                 subs
                 if tier == "owner"
                 else [s for s in subs if str(s.get("principal_handle", "")).lower() == author_handle]
             )
-            if not visible:
-                return "No matching webhook subscriptions found."
-            lines = []
-            for s in visible:
-                state_str = "active" if s.get("active", True) else f"DISABLED ({s.get('disabled_reason') or 'unknown'})"
+            lines: list[str] = []
+            if visible:
+                for s in visible:
+                    state_str = (
+                        "active" if s.get("active", True) else f"DISABLED ({s.get('disabled_reason') or 'unknown'})"
+                    )
+                    last_sent = s.get("last_sent_at") or "never"
+                    lines.append(
+                        f"- `{s['id']}` (`{s['principal_handle']}`, boards={s.get('boards')}, {state_str}, "
+                        f"failures={s.get('failure_count', 0)}, last_sent={last_sent})"
+                    )
+            else:
+                lines.append("No matching webhook subscriptions found.")
+            cur_board = _clean_slug(current_board)
+            if tier != "owner" and cur_board and cur_board in caller_boards:
                 lines.append(
-                    f"- `{s['id']}` (`{s['principal_handle']}`, boards={s.get('boards')}, {state_str}, "
-                    f"failures={s.get('failure_count', 0)})"
+                    f"_Tip: run `list members` or `check webhook @<handle>` to check teammates on `{cur_board}`._"
                 )
-            return "**Webhook Subscriptions**\n" + "\n".join(lines)
+            return "**Webhook Subscriptions**\n" + "\n".join(lines) if visible else "\n".join(lines)
 
         if kind == "create_board":
             if tier not in ("owner", "trusted"):
@@ -875,7 +1043,8 @@ class AdminBotProcessor:
         body = str(msg.get("body_md", ""))
         if not author or author == self.bot_handle:
             return None
-        if not self._is_directly_addressed(body):
+        addressed = self._extract_addressed_text(body)
+        if addressed is None:
             return None
 
         principals = self.board.list_principals()
@@ -891,9 +1060,9 @@ class AdminBotProcessor:
             if str(m["principal_handle"]).lower() == author
         }
 
-        actions = parse_deterministic_commands(body, bot_handle=self.bot_handle)
+        actions = parse_deterministic_commands(addressed, bot_handle=self.bot_handle)
         if not actions and self.ollama is not None:
-            stripped = _strip_handle_prefix(body, self.bot_handle)
+            stripped = _strip_handle_prefix(addressed, self.bot_handle)
             visible_boards = (
                 sorted({str(b["slug"]) for b in self.board.list_boards()})
                 if tier == "owner"
@@ -904,6 +1073,7 @@ class AdminBotProcessor:
                     requester=author,
                     request_text=stripped,
                     visible_boards=visible_boards,
+                    current_board=board_slug,
                 )
             except Exception as exc:
                 logger.warning("Ollama intent parser error: %s", exc)
@@ -929,6 +1099,7 @@ class AdminBotProcessor:
                         memberships=memberships,
                         caller_boards=caller_boards,
                         newly_created_boards=newly_created,
+                        current_board=board_slug,
                     )
                 )
             except Exception as exc:

@@ -12,6 +12,7 @@ from agent_board.services.auth import record_audit, require_board_role, require_
 from agent_board.services.context import AppServices, AuthContext
 from agent_board.services.idempotency import execute_idempotent
 from agent_board.store import boards as boards_store
+from agent_board.store import delivery as delivery_store
 from agent_board.store import principals as principals_store
 
 _DEFAULT_SETTINGS = {"agents_may_record_decisions": True}
@@ -213,6 +214,58 @@ def get_board(services: AppServices, ctx: AuthContext, *, board_slug: str) -> di
     row = boards_store.get_board_stats_for_principal(conn, board["id"], ctx.principal_id)
     assert row is not None
     return board_row_to_dict(row, ctx)
+
+
+def list_board_members(services: AppServices, ctx: AuthContext, *, board_slug: str) -> dict[str, Any]:
+    """Return board memberships with read cursors and non-secret webhook health for board members."""
+    rconn = services.db.read_conn()
+    board, _ = require_board_role(rconn, ctx, board_slug, "readonly", allow_archived=True)
+    latest_seq = int(board["next_seq"]) - 1
+    member_rows = boards_store.list_memberships_for_board(rconn, board["id"])
+    cursor_rows = delivery_store.list_cursors_for_board(rconn, board["id"])
+    sub_rows = delivery_store.list_subscriptions_for_board_members(rconn, board["id"])
+
+    cursors_by_pid = {str(c["principal_id"]): c for c in cursor_rows}
+    subs_by_pid: dict[str, list[sqlite3.Row]] = {}
+    for s in sub_rows:
+        sub_boards = json.loads(s["boards"])
+        if "*" in sub_boards or board["slug"] in sub_boards:
+            subs_by_pid.setdefault(str(s["principal_id"]), []).append(s)
+
+    members: list[dict[str, Any]] = []
+    for m in member_rows:
+        pid = str(m["principal_id"])
+        cursor = cursors_by_pid.get(pid)
+        p_subs = subs_by_pid.get(pid, [])
+        raw_tags = m["tags"] if "tags" in m.keys() else None
+        tags = json.loads(raw_tags) if isinstance(raw_tags, str) and raw_tags else []
+        members.append(
+            {
+                "handle": m["handle"],
+                "display_name": m["display_name"],
+                "kind": m["kind"],
+                "role": m["role"],
+                "tags": tags,
+                "disabled": m["disabled_at"] is not None,
+                "read_seq": int(cursor["read_seq"]) if cursor else 0,
+                "cursor_updated_at": cursor["updated_at"] if cursor else None,
+                "webhook": {
+                    "subscription_count": len(p_subs),
+                    "active_count": sum(1 for s in p_subs if bool(s["active"])),
+                    "disabled_count": sum(1 for s in p_subs if not bool(s["active"])),
+                    "failure_count": sum(int(s["failure_count"] or 0) for s in p_subs),
+                    "disabled_reasons": sorted(
+                        {str(s["disabled_reason"]) for s in p_subs if not bool(s["active"]) and s["disabled_reason"]}
+                    ),
+                    "last_sent_at": max((str(s["last_sent_at"]) for s in p_subs if s["last_sent_at"]), default=None),
+                },
+            }
+        )
+    return {
+        "board": board["slug"],
+        "latest_seq": latest_seq,
+        "members": members,
+    }
 
 
 def update_board(

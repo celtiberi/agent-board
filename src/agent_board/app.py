@@ -119,6 +119,11 @@ def create_app(
             "endpoints": {
                 "me": "/api/v1/me",
                 "boards": "/api/v1/boards",
+                "board_brief": "/api/v1/boards/{slug}/brief",
+                "board_messages": "/api/v1/boards/{slug}/messages",
+                "board_cursor": "/api/v1/boards/{slug}/cursor",
+                "board_members": "/api/v1/boards/{slug}/members",
+                "board_ack": "/api/v1/boards/{slug}/ack",
                 "search": "/api/v1/search",
                 "subscriptions": "/api/v1/subscriptions",
                 "healthz": "/api/v1/healthz",

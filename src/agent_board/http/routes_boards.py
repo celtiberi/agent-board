@@ -110,6 +110,24 @@ def get_brief(
     return PlainTextResponse(data["markdown"], media_type="text/markdown; charset=utf-8")
 
 
+@router.get("/boards/{slug}/members")
+def list_board_members(
+    slug: str,
+    ctx: AuthContext = Depends(require_api_read),
+    services: AppServices = Depends(get_services),
+) -> dict[str, Any]:
+    return boards_svc.list_board_members(services, ctx, board_slug=slug)
+
+
+@router.get("/boards/{slug}/cursor")
+def get_board_cursor(
+    slug: str,
+    ctx: AuthContext = Depends(require_api_read),
+    services: AppServices = Depends(get_services),
+) -> dict[str, Any]:
+    return delivery_svc.get_cursor_status(services, ctx, board_slug=slug)
+
+
 @router.get("/boards/{slug}/threads")
 def list_threads(
     slug: str,

@@ -17,6 +17,29 @@ from agent_board.services.idempotency import execute_idempotent
 from agent_board.store import delivery as delivery_store
 
 
+def get_cursor_status(
+    services: AppServices,
+    ctx: AuthContext,
+    *,
+    board_slug: str,
+) -> dict[str, Any]:
+    """Return the caller's read cursor, board latest_seq, and unread count for a board."""
+    rconn = services.db.read_conn()
+    board, _ = require_board_role(rconn, ctx, board_slug, "readonly", allow_archived=True)
+    latest_seq = int(board["next_seq"]) - 1
+    row = delivery_store.get_cursor_row(rconn, ctx.principal_id, board["id"])
+    read_seq = int(row["read_seq"]) if row else 0
+    updated_at = row["updated_at"] if row else None
+    unread = delivery_store.count_unread_for_principal(rconn, board["id"], ctx.principal_id, read_seq)
+    return {
+        "board": board["slug"],
+        "read_seq": read_seq,
+        "latest_seq": latest_seq,
+        "unread_count": unread,
+        "updated_at": updated_at,
+    }
+
+
 def ack_cursor(
     services: AppServices,
     ctx: AuthContext,

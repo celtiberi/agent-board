@@ -47,13 +47,21 @@ def build_remote_onboarding_md(
         "",
         "### Workflow on Each Wake / Session",
         f"1. Read the brief first: `get_brief(board='{first_board}')` (or `GET /api/v1/boards/{first_board}/brief`).",
-        f"2. Pull unread messages: `read_messages(board='{first_board}')` "
-        "(omitting `since_seq` reads from your ack cursor).",
         (
-            "3. Reply in the relevant thread with `post_message` (`Idempotency-Key` / `idempotency_key`) "
+            f"2. Pull unread messages: `read_messages(board='{first_board}')` "
+            f"(or `GET /api/v1/boards/{first_board}/messages`; check cursor with "
+            f"`GET /api/v1/boards/{first_board}/cursor`, teammate cursors/webhook health with "
+            f"`GET /api/v1/boards/{first_board}/members`)."
+        ),
+        (
+            f"3. Reply in the relevant thread with `post_message` "
+            f"(`POST /api/v1/boards/{first_board}/messages` with `Idempotency-Key` / `idempotency_key`) "
             "and @mention participants when requesting action."
         ),
-        f"4. Always advance your cursor when done: `ack(board='{first_board}', read_seq=<latest_seq>)`.",
+        (
+            f"4. Always advance your cursor when done: `ack(board='{first_board}', read_seq=<latest_seq>)` "
+            f'(or `POST /api/v1/boards/{first_board}/ack` with `{{"read_seq": <latest_seq>}}`).'
+        ),
     ]
     if has_webhook:
         note_behavior = (

@@ -275,7 +275,9 @@ def test_sidecar_binary_resolution_uses_env_and_home_fallbacks(
 
     assert _resolve_agentapi() == "/custom/bin/agentapi"
     assert _resolve_board_cli("qa-bot") == str(wrapper)
-    prompt = _build_prompt(
+
+    # Without agent-board-qa-bot in mcp_config.json, prompt uses CLI-first instructions.
+    cli_prompt = _build_prompt(
         board="alpha",
         handle="qa-bot",
         latest_seq=9,
@@ -285,7 +287,28 @@ def test_sidecar_binary_resolution_uses_env_and_home_fallbacks(
         source="webhook",
         trigger_seqs=[108, 110],
         trigger_threads=["website-docs"],
+        urgent=True,
     )
-    assert "agent-board-qa-bot" in prompt
-    assert str(wrapper) in prompt
-    assert "Triggered by #108, #110 in [website-docs]" in prompt
+    assert cli_prompt.startswith("[URGENT / P0] ")
+    assert "agent-board-qa-bot" not in cli_prompt
+    assert str(wrapper) in cli_prompt
+    assert "Triggered by #108, #110 in [website-docs]" in cli_prompt
+
+    # When agent-board-qa-bot IS registered in mcp_config.json, prompt includes both MCP and CLI.
+    gem_dir = tmp_path / ".gemini" / "config"
+    gem_dir.mkdir(parents=True, exist_ok=True)
+    (gem_dir / "mcp_config.json").write_text(
+        json.dumps({"mcpServers": {"agent-board-qa-bot": {"command": "board"}}}),
+        encoding="utf-8",
+    )
+    mcp_prompt = _build_prompt(
+        board="alpha",
+        handle="qa-bot",
+        latest_seq=9,
+        unread_count=2,
+        types=["task"],
+        mentioned=True,
+        source="webhook",
+    )
+    assert "agent-board-qa-bot" in mcp_prompt
+    assert str(wrapper) in mcp_prompt

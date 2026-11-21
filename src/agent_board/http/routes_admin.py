@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import json
+import re
 from typing import Any
 
 from fastapi import APIRouter, Depends, Query
 
 from agent_board.backup import manager as backup_mgr
+from agent_board.errors import ValidationError
 from agent_board.http.deps import get_services, require_api_read, require_api_write
 from agent_board.http.models import (
     CreatePrincipalRequest,
@@ -15,14 +18,20 @@ from agent_board.http.models import (
     SetMembershipRequest,
     SetPrincipalTagsRequest,
     ShoutRequest,
+    TelemetrySnapshotRequest,
     UpdatePrincipalRequest,
 )
+from agent_board.ids import utc_now_iso
 from agent_board.services import auth as auth_svc
 from agent_board.services import monitor as monitor_svc
 from agent_board.services import onboarding as onboarding_svc
 from agent_board.services import shout as shout_svc
 from agent_board.services.context import AppServices, AuthContext
 from agent_board.store import boards as boards_store
+from agent_board.store import telemetry as telemetry_store
+
+_TELEMETRY_HOST_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+_MAX_TELEMETRY_BYTES = 32_768
 
 router = APIRouter()
 
@@ -208,6 +217,58 @@ def admin_monitor(
         agent_handle=agent,
         limit=limit,
     )
+
+
+@router.get("/admin/telemetry")
+def admin_get_telemetry(
+    ctx: AuthContext = Depends(require_api_read),
+    services: AppServices = Depends(get_services),
+) -> dict[str, Any]:
+    auth_svc.require_server_owner(ctx)
+    rows = telemetry_store.list_telemetry_snapshots(services.db.read_conn())
+    return {
+        "snapshots": [
+            {
+                "host_id": r["host_id"],
+                "reported_at": r["reported_at"],
+                "payload": json.loads(r["payload_json"]),
+            }
+            for r in rows
+        ]
+    }
+
+
+@router.post("/admin/telemetry", status_code=200)
+def admin_upsert_telemetry(
+    body: TelemetrySnapshotRequest,
+    ctx: AuthContext = Depends(require_api_write),
+    services: AppServices = Depends(get_services),
+) -> dict[str, Any]:
+    auth_svc.require_server_owner(ctx)
+    clean_host = body.host_id.strip()
+    if not _TELEMETRY_HOST_RE.match(clean_host):
+        raise ValidationError("host_id must be 1-64 characters matching [A-Za-z0-9._-]")
+    payload = body.model_dump(by_alias=True)
+    payload["host_id"] = clean_host
+    payload_json = json.dumps(payload, separators=(",", ":"))
+    if len(payload_json.encode("utf-8")) > _MAX_TELEMETRY_BYTES:
+        raise ValidationError(f"Telemetry payload exceeds {_MAX_TELEMETRY_BYTES} bytes")
+    now_iso = utc_now_iso()
+    with services.db.write_tx() as conn:
+        telemetry_store.upsert_telemetry_snapshot(
+            conn,
+            host_id=clean_host,
+            reported_at=now_iso,
+            payload_json=payload_json,
+        )
+        auth_svc.record_audit(
+            conn,
+            ctx=ctx,
+            action="telemetry.upsert",
+            ok=True,
+            target=clean_host,
+        )
+    return {"host_id": clean_host, "reported_at": now_iso, "ok": True}
 
 
 @router.get("/admin/backups")

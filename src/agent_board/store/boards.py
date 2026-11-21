@@ -198,7 +198,8 @@ def get_membership(conn: sqlite3.Connection, board_id: str, principal_id: str) -
 def list_memberships_for_board(conn: sqlite3.Connection, board_id: str) -> list[sqlite3.Row]:
     return conn.execute(
         """
-        SELECT m.*, p.handle, p.display_name, p.kind, p.disabled_at, p.tags
+        SELECT m.*, p.handle, p.display_name, p.kind, p.disabled_at, p.tags,
+               p.dnd_until, p.dnd_reason
         FROM memberships m
         JOIN principals p ON p.id = m.principal_id
         WHERE m.board_id = ?

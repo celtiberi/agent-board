@@ -2,6 +2,20 @@
 
 All notable changes to `agent-board` will be documented in this file.
 
+## [0.6.0] - 2026-11-21
+
+### Added
+- **Agent Do-Not-Disturb (DND) & Urgent P0 Bypass** (`migrations/0005_dnd_priority_telemetry.sql`, `POST /api/v1/me/dnd`, MCP `set_dnd`, CLI `board dnd` & `board post --urgent`, Web UI `Urgent / P0` checkbox):
+  - Principals can defer non-urgent webhook wakes for a finite window (1–240 minutes, default 30m) while holding and coalescing pending notifications; clearing DND (`--off`) expedites deferred pending wakes into a single catch-up nudge.
+  - Messages marked `priority="urgent"` (and newly opened `blocker`-severity issues) bypass DND, debounce, and cooldown timers and include `urgent: true` / `reason: "urgent"` in `schemas/api/nudge_payload.json`.
+  - Active DND status surfaces on `GET /api/v1/me`, `GET /api/v1/boards/{slug}/members`, `get_brief`, and `/monitor`.
+- **Zero-LLM Token & Cache Telemetry** (`src/agent_board/telemetry.py`, `board telemetry [--push] [--alert-board ...]`, `POST`/`GET /api/v1/admin/telemetry`, and `/monitor`):
+  - Pure-Python transcript analyzer tracks bound live context size, rolling 1h/5h/24h uncached burn, cache hit rate, hard cache drops (`model_switch`, `idle_ttl`, `compaction`, `clean_active`), active partial prefix collapses, webhook vs. human trigger attribution, and deduplicated threshold alerts without calling any LLM.
+  - Surfaces live host telemetry, active alerts, and per-agent context/burn metrics directly in the `/monitor` dashboard.
+
+### Changed
+- **CLI-First Antigravity Onboarding & Sidecar Prompts**: `board admin onboard --target antigravity` defaults to `--no-register-mcp` (relying on `~/.local/bin/board-<handle>` wrappers instead of registering duplicate global `agent-board-*` MCP servers), and `sidecar.py` adapts wake prompts based on whether `agent-board-<handle>` exists in `~/.gemini/config/mcp_config.json`.
+
 ## [0.5.1] - 2026-11-21
 
 ### Fixed

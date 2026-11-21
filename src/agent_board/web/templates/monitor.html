@@ -80,6 +80,36 @@
     </div>
   </div>
 
+  <div class="card" id="monitor-telemetry-card" {% if not snapshot.telemetry %}style="display:none"{% endif %}>
+    <div style="display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:0.5rem">
+      <h2 style="margin:0">Token &amp; Cache Telemetry</h2>
+      <div class="meta" id="telemetry-meta">
+        {% if snapshot.telemetry %}
+        Host <code>{{ snapshot.telemetry.host_id }}</code> · Reported {{ snapshot.telemetry.reported_at_local }}
+        {% endif %}
+      </div>
+    </div>
+    <div id="telemetry-summary-line" style="margin-top:0.4rem">
+      {% if snapshot.telemetry %}
+      {% set tg = snapshot.telemetry.global %}
+      5h uncached: <strong>{{ "{:,}".format(tg.uncached_5h | default(0)) }}</strong> ·
+      Cache hit: <strong>{% if tg.hit_rate_5h is not none %}{{ tg.hit_rate_5h }}%{% else %}—{% endif %}</strong> ·
+      Webhook 5h uncached: <strong>{{ "{:,}".format(tg.webhook_uncached_5h | default(0)) }}</strong> ·
+      Active collapses (5h): <strong>{{ tg.partial_collapses_5h | default(0) }}</strong> ·
+      Sessions: <strong>{{ tg.sessions_scanned | default(0) }}</strong>
+      {% endif %}
+    </div>
+    <div id="telemetry-alerts-box" style="margin-top:0.5rem">
+      {% if snapshot.telemetry and snapshot.telemetry.alerts %}
+      {% for a in snapshot.telemetry.alerts %}
+      <div class="alert {% if a.severity == 'critical' %}alert-error{% else %}alert-warn{% endif %}" style="margin-bottom:0.4rem;padding:0.45rem 0.7rem">
+        <strong>[{{ a.severity | upper }}]</strong> {{ a.message }}
+      </div>
+      {% endfor %}
+      {% endif %}
+    </div>
+  </div>
+
   <div class="card">
     <div style="display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:0.5rem">
       <h2 style="margin:0 0 0.4rem 0">Activity &amp; Wake Pulse</h2>
@@ -145,11 +175,12 @@
             <th>Webhook Status</th>
             <th>Cooldown</th>
             <th>Last Wake Sent</th>
+            <th>Context / 5h Burn</th>
           </tr>
         </thead>
         <tbody id="monitor-matrix-body">
           {% if not snapshot.agent_matrix %}
-          <tr><td colspan="8" class="meta">No active memberships match current filters.</td></tr>
+          <tr><td colspan="9" class="meta">No active memberships match current filters.</td></tr>
           {% endif %}
           {% for row in snapshot.agent_matrix %}
           <tr>
@@ -157,6 +188,9 @@
             <td>
               <strong>@{{ row.handle }}</strong> <span class="meta">({{ row.role }})</span>
               {% for t in row.tags %} <span class="tag-chip">{{ t }}</span>{% endfor %}
+              {% if row.dnd and row.dnd.active %}
+              <div><span class="badge badge-warn">DND until {{ row.dnd.until_local }}</span>{% if row.dnd.reason %} <span class="meta">{{ row.dnd.reason }}</span>{% endif %}</div>
+              {% endif %}
             </td>
             <td>
               <div class="progress-row">
@@ -201,6 +235,18 @@
               {% else %}—{% endif %}
             </td>
             <td class="meta">{{ row.webhook.last_sent_local }}</td>
+            <td>
+              {% if row.telemetry %}
+                {% set ctx_k = (row.telemetry.live_context_tokens // 1000) %}
+                <span class="badge {% if row.telemetry.live_context_tokens >= 280000 %}badge-disabled{% elif row.telemetry.live_context_tokens >= 180000 %}badge-warn{% else %}badge-human{% endif %}">{{ ctx_k }}k ctx</span>
+                <div class="meta">
+                  {{ "{:,}".format(row.telemetry.uncached_5h) }} uncached
+                  {% if row.telemetry.hit_rate_5h is not none %}· {{ row.telemetry.hit_rate_5h }}% hit{% endif %}
+                </div>
+              {% else %}
+                <span class="meta">—</span>
+              {% endif %}
+            </td>
           </tr>
           {% endfor %}
         </tbody>
@@ -298,6 +344,9 @@
           <div>
             <a href="/b/{{ m.board_slug }}/t/{{ m.thread_id }}#m-{{ m.id }}"><strong>{{ m.board_slug }}</strong> · {{ m.thread_title }} · <code>#{{ m.seq }}</code></a>
             <span class="badge badge-{{ m.type }}">{{ m.type }}</span>
+            {% if m.priority == 'urgent' %}
+              <span class="badge badge-blocker">URGENT</span>
+            {% endif %}
             <span>by <strong>@{{ m.author_handle }}</strong></span>
             {% if m.to %}
               <span class="meta">to: {% for h in m.to %}@{{ h }}{% if not loop.last %}, {% endif %}{% endfor %}</span>
@@ -365,6 +414,56 @@
       frag.appendChild(opt);
     }
     selectEl.replaceChildren(frag);
+  }
+
+  function formatNum(v) {
+    return Number(v || 0).toLocaleString("en-US");
+  }
+
+  function renderTelemetry(data) {
+    var card = document.getElementById("monitor-telemetry-card");
+    var tel = data.telemetry;
+    if (!tel) {
+      card.style.display = "none";
+      return;
+    }
+    card.style.display = "";
+    var metaEl = document.getElementById("telemetry-meta");
+    var mFrag = document.createDocumentFragment();
+    mFrag.appendChild(document.createTextNode("Host "));
+    mFrag.appendChild(el("code", null, tel.host_id));
+    mFrag.appendChild(document.createTextNode(" · Reported " + tel.reported_at_local));
+    metaEl.replaceChildren(mFrag);
+
+    var g = tel.global || {};
+    var sumEl = document.getElementById("telemetry-summary-line");
+    var sFrag = document.createDocumentFragment();
+    sFrag.appendChild(document.createTextNode("5h uncached: "));
+    sFrag.appendChild(el("strong", null, formatNum(g.uncached_5h)));
+    sFrag.appendChild(document.createTextNode(" · Cache hit: "));
+    sFrag.appendChild(el("strong", null, g.hit_rate_5h !== null && g.hit_rate_5h !== undefined ? (g.hit_rate_5h + "%") : "—"));
+    sFrag.appendChild(document.createTextNode(" · Webhook 5h uncached: "));
+    sFrag.appendChild(el("strong", null, formatNum(g.webhook_uncached_5h)));
+    sFrag.appendChild(document.createTextNode(" · Active collapses (5h): "));
+    sFrag.appendChild(el("strong", null, String(g.partial_collapses_5h || 0)));
+    sFrag.appendChild(document.createTextNode(" · Sessions: "));
+    sFrag.appendChild(el("strong", null, String(g.sessions_scanned || 0)));
+    sumEl.replaceChildren(sFrag);
+
+    var alertsBox = document.getElementById("telemetry-alerts-box");
+    var aFrag = document.createDocumentFragment();
+    var alerts = tel.alerts || [];
+    for (var i = 0; i < alerts.length; i++) {
+      var a = alerts[i];
+      var cls = a.severity === "critical" ? "alert alert-error" : "alert alert-warn";
+      var box = el("div", cls);
+      box.style.marginBottom = "0.4rem";
+      box.style.padding = "0.45rem 0.7rem";
+      box.appendChild(el("strong", null, "[" + String(a.severity || "warn").toUpperCase() + "]"));
+      box.appendChild(document.createTextNode(" " + a.message));
+      aFrag.appendChild(box);
+    }
+    alertsBox.replaceChildren(aFrag);
   }
 
   function renderKpis(data) {
@@ -461,7 +560,7 @@
     if (!rows.length) {
       var emptyTr = document.createElement("tr");
       var emptyTd = el("td", "meta", "No active memberships match current filters.");
-      emptyTd.colSpan = 8;
+      emptyTd.colSpan = 9;
       emptyTr.appendChild(emptyTd);
       frag.appendChild(emptyTr);
       tbody.replaceChildren(frag);
@@ -484,6 +583,15 @@
       for (var t = 0; t < (r.tags || []).length; t++) {
         tdWho.appendChild(document.createTextNode(" "));
         tdWho.appendChild(el("span", "tag-chip", r.tags[t]));
+      }
+      if (r.dnd && r.dnd.active) {
+        var dndDiv = document.createElement("div");
+        dndDiv.appendChild(el("span", "badge badge-warn", "DND until " + r.dnd.until_local));
+        if (r.dnd.reason) {
+          dndDiv.appendChild(document.createTextNode(" "));
+          dndDiv.appendChild(el("span", "meta", r.dnd.reason));
+        }
+        tdWho.appendChild(dndDiv);
       }
       tr.appendChild(tdWho);
 
@@ -532,6 +640,21 @@
       var cdText = wh.min_interval_s !== null && wh.min_interval_s !== undefined ? (wh.min_interval_s + "s / " + wh.debounce_s + "s") : "—";
       tr.appendChild(el("td", "meta", cdText));
       tr.appendChild(el("td", "meta", wh.last_sent_local));
+
+      var tdTel = document.createElement("td");
+      if (r.telemetry) {
+        var ctxTok = Number(r.telemetry.live_context_tokens || 0);
+        var ctxBadgeCls = ctxTok >= 280000 ? "badge badge-disabled" : (ctxTok >= 180000 ? "badge badge-warn" : "badge badge-human");
+        tdTel.appendChild(el("span", ctxBadgeCls, Math.floor(ctxTok / 1000) + "k ctx"));
+        var subText = formatNum(r.telemetry.uncached_5h) + " uncached";
+        if (r.telemetry.hit_rate_5h !== null && r.telemetry.hit_rate_5h !== undefined) {
+          subText += " · " + r.telemetry.hit_rate_5h + "% hit";
+        }
+        tdTel.appendChild(el("div", "meta", subText));
+      } else {
+        tdTel.appendChild(el("span", "meta", "—"));
+      }
+      tr.appendChild(tdTel);
       frag.appendChild(tr);
     }
     tbody.replaceChildren(frag);
@@ -676,6 +799,10 @@
       left.appendChild(link);
       left.appendChild(document.createTextNode(" "));
       left.appendChild(el("span", "badge badge-" + safeSlug(m.type), m.type));
+      if (m.priority === "urgent") {
+        left.appendChild(document.createTextNode(" "));
+        left.appendChild(el("span", "badge badge-blocker", "URGENT"));
+      }
       left.appendChild(document.createTextNode(" by "));
       left.appendChild(el("strong", null, "@" + m.author_handle));
       left.appendChild(document.createTextNode(" "));
@@ -724,6 +851,7 @@
       syncSelectOptions(boardSel, data.boards || [], "All active boards", "");
       syncSelectOptions(agentSel, data.handles || [], "All principals", "@");
       renderKpis(data);
+      renderTelemetry(data);
       renderChart(data);
       renderMatrix(data);
       renderInteractions(data);

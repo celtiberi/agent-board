@@ -87,6 +87,19 @@ def update_principal_disabled(conn: sqlite3.Connection, principal_id: str, disab
     )
 
 
+def update_principal_dnd(
+    conn: sqlite3.Connection,
+    principal_id: str,
+    *,
+    dnd_until: str | None,
+    dnd_reason: str | None,
+) -> None:
+    conn.execute(
+        "UPDATE principals SET dnd_until = ?, dnd_reason = ? WHERE id = ?",
+        (dnd_until, dnd_reason, principal_id),
+    )
+
+
 def upsert_human_auth(
     conn: sqlite3.Connection,
     *,

@@ -152,7 +152,7 @@ def list_active_subscriptions(conn: sqlite3.Connection) -> list[sqlite3.Row]:
 def list_active_subscriptions_for_board(conn: sqlite3.Connection, board_id: str) -> list[sqlite3.Row]:
     return conn.execute(
         """
-        SELECT s.*, p.disabled_at AS principal_disabled_at
+        SELECT s.*, p.disabled_at AS principal_disabled_at, p.dnd_until AS principal_dnd_until
         FROM subscriptions s
         JOIN principals p ON p.id = s.principal_id
         WHERE s.active = 1
@@ -251,7 +251,24 @@ def enqueue_outbox_pending(
     latest_seq: int,
     next_attempt_at: str,
     created_at: str,
+    urgent: bool = False,
 ) -> None:
+    if urgent:
+        conn.execute(
+            """
+            INSERT INTO outbox (
+                id, subscription_id, board_id, latest_seq, attempt, next_attempt_at, status, created_at
+            )
+            VALUES (?, ?, ?, ?, 0, ?, 'pending', ?)
+            ON CONFLICT(subscription_id, board_id) WHERE status = 'pending'
+            DO UPDATE SET
+                latest_seq = MAX(outbox.latest_seq, excluded.latest_seq),
+                next_attempt_at = MIN(outbox.next_attempt_at, excluded.next_attempt_at)
+            """,
+            (outbox_id, subscription_id, board_id, latest_seq, next_attempt_at, created_at),
+        )
+        return
+
     conn.execute(
         """
         INSERT INTO outbox (
@@ -271,6 +288,53 @@ def enqueue_outbox_pending(
         """,
         (outbox_id, subscription_id, board_id, latest_seq, next_attempt_at, created_at),
     )
+
+
+def expedite_pending_outbox_for_principal(conn: sqlite3.Connection, *, principal_id: str, now_iso: str) -> int:
+    cur = conn.execute(
+        """
+        UPDATE outbox
+        SET next_attempt_at = ?
+        WHERE status = 'pending'
+          AND attempt = 0
+          AND next_attempt_at > ?
+          AND subscription_id IN (SELECT id FROM subscriptions WHERE principal_id = ?)
+        """,
+        (now_iso, now_iso, principal_id),
+    )
+    return cur.rowcount
+
+
+def defer_sending_outbox_until(conn: sqlite3.Connection, *, outbox_id: str, defer_until_iso: str) -> None:
+    """Return a claimed 'sending' outbox row to 'pending' until DND expires without violating uniqueness."""
+    row = conn.execute("SELECT subscription_id, board_id, latest_seq FROM outbox WHERE id = ?", (outbox_id,)).fetchone()
+    if row is None:
+        return
+    existing = conn.execute(
+        """
+        SELECT id FROM outbox
+        WHERE subscription_id = ? AND board_id = ? AND status = 'pending'
+        """,
+        (row["subscription_id"], row["board_id"]),
+    ).fetchone()
+    if existing is not None:
+        conn.execute(
+            "UPDATE outbox SET latest_seq = MAX(latest_seq, ?) WHERE id = ?",
+            (row["latest_seq"], existing["id"]),
+        )
+        conn.execute(
+            "UPDATE outbox SET status = 'suppressed', locked_at = NULL, last_error = 'deferred_merged' WHERE id = ?",
+            (outbox_id,),
+        )
+    else:
+        conn.execute(
+            """
+            UPDATE outbox
+            SET status = 'pending', locked_at = NULL, next_attempt_at = ?
+            WHERE id = ?
+            """,
+            (defer_until_iso, outbox_id),
+        )
 
 
 def heal_subscription_delivery(
@@ -427,7 +491,7 @@ def claim_due_outbox_rows(conn: sqlite3.Connection, *, now_iso: str, limit: int 
         """
         SELECT o.*, b.slug AS board_slug, s.principal_id, s.url, s.auth_header_enc,
                s.hmac_secret_enc, s.payload_format, s.filter, s.active, s.failure_count,
-               p.handle AS principal_handle
+               p.handle AS principal_handle, p.dnd_until AS principal_dnd_until
         FROM outbox o
         JOIN boards b ON b.id = o.board_id
         JOIN subscriptions s ON s.id = o.subscription_id
@@ -564,7 +628,7 @@ def get_nudge_unread_details(
     """Compute unread summary and triggering message seq/thread metadata for webhook delivery."""
     rows = conn.execute(
         """
-        SELECT m.id, m.seq, m.type, t.title AS thread_title,
+        SELECT m.id, m.seq, m.type, m.priority, t.title AS thread_title,
                EXISTS(
                    SELECT 1 FROM mentions mn
                    WHERE mn.message_id = m.id AND mn.principal_id = ? AND mn.role = 'to'
@@ -587,6 +651,7 @@ def get_nudge_unread_details(
     unread_count = len(rows)
     seen_types: list[str] = []
     mentioned = False
+    has_urgent = False
     trigger_seqs: list[int] = []
     trigger_threads: list[str] = []
     seen_threads: set[str] = set()
@@ -603,17 +668,24 @@ def get_nudge_unread_details(
             and (not allowed_types or row["type"] in allowed_types)
         )
         if matches:
+            if str(row["priority"]) == "urgent":
+                has_urgent = True
             trigger_seqs.append(int(row["seq"]))
             title = str(row["thread_title"])
             if title not in seen_threads:
                 seen_threads.add(title)
                 trigger_threads.append(title)
 
-    reason = "to" if mentioned else ("actionable_type" if trigger_seqs else "activity")
+    reason = (
+        "urgent"
+        if has_urgent
+        else ("to" if mentioned else ("actionable_type" if trigger_seqs else "activity"))
+    )
     return {
         "unread_count": unread_count,
         "types": seen_types,
         "mentioned": mentioned,
+        "urgent": has_urgent,
         "trigger_seqs": trigger_seqs[-20:],
         "trigger_threads": trigger_threads[-10:],
         "reason": reason,

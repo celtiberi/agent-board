@@ -276,6 +276,18 @@ def _resolve_board_cli(handle: str) -> str:
     return base_bin
 
 
+def _has_antigravity_mcp_server(server_name: str) -> bool:
+    mcp_path = Path("~/.gemini/config/mcp_config.json").expanduser()
+    if not mcp_path.exists():
+        return False
+    try:
+        data = json.loads(mcp_path.read_text(encoding="utf-8"))
+        servers = data.get("mcpServers")
+        return isinstance(servers, dict) and server_name in servers
+    except Exception:
+        return False
+
+
 def _build_prompt(
     *,
     board: str,
@@ -287,28 +299,50 @@ def _build_prompt(
     source: str,
     trigger_seqs: list[int] | None = None,
     trigger_threads: list[str] | None = None,
+    urgent: bool = False,
 ) -> str:
     type_str = ", ".join(types) if types else "unknown"
+    urgent_prefix = "[URGENT / P0] " if urgent else ""
     mention_note = f" You were directly addressed in `to` (`@{handle}`)." if mentioned else ""
     trigger_note = ""
     if trigger_seqs:
         seq_str = ", ".join(f"#{s}" for s in trigger_seqs)
         thread_str = f" in [{', '.join(trigger_threads)}]" if trigger_threads else ""
         trigger_note = f" Triggered by {seq_str}{thread_str}."
-    mcp_name = f"agent-board-{handle}" if (_profiles_dir_path() / f"{handle}.toml").exists() else "agent-board"
+    has_profile = (_profiles_dir_path() / f"{handle}.toml").exists()
+    candidate_mcp = f"agent-board-{handle}" if has_profile else "agent-board"
+    use_mcp = _has_antigravity_mcp_server(candidate_mcp) or not has_profile
     cli_path = _resolve_board_cli(handle)
 
+    if use_mcp:
+        return (
+            f"{urgent_prefix}Agent Board notification ({source}) for `@{handle}` on board `{board}` "
+            f"(latest_seq={latest_seq}, unread={unread_count}, types=[{type_str}]).{mention_note}{trigger_note}\n\n"
+            f"Please inspect and respond using the `{candidate_mcp}` MCP server or `{cli_path}` CLI:\n"
+            f"1. Read unread messages: `read_messages(board='{board}')` or `{cli_path} read {board}`.\n"
+            f"2. Check the brief if needed: `get_brief(board='{board}')` or `{cli_path} brief {board}`.\n"
+            f"3. Handle any assigned tasks, questions, issues, or retest reports and post replies "
+            f"with `post_message` / `{cli_path} post` (use `to` for recipients who should wake, "
+            f"`cc` for FYI-only without waking, `--urgent` only for P0 DND bypass, "
+            f"or `to=[]` / `--silent` for quiet closures).\n"
+            f"4. Set temporary Do-Not-Disturb during long focused work if needed "
+            f"(`set_dnd` / `{cli_path} dnd -m 30`).\n"
+            f"5. Acknowledge your cursor when finished: `ack(board='{board}', read_seq={latest_seq})` "
+            f"or `{cli_path} ack {board} {latest_seq}`."
+        )
+
     return (
-        f"Agent Board notification ({source}) for `@{handle}` on board `{board}` "
+        f"{urgent_prefix}Agent Board notification ({source}) for `@{handle}` on board `{board}` "
         f"(latest_seq={latest_seq}, unread={unread_count}, types=[{type_str}]).{mention_note}{trigger_note}\n\n"
-        f"Please inspect and respond using the `{mcp_name}` MCP server or `{cli_path}` CLI:\n"
-        f"1. Read unread messages: `read_messages(board='{board}')` or `{cli_path} read {board}`.\n"
-        f"2. Check the brief if needed: `get_brief(board='{board}')` or `{cli_path} brief {board}`.\n"
+        f"Inspect and respond using the `{cli_path}` CLI:\n"
+        f"1. Read unread messages: `{cli_path} read {board}`.\n"
+        f"2. Check the brief if needed: `{cli_path} brief {board}`.\n"
         f"3. Handle any assigned tasks, questions, issues, or retest reports and post replies "
-        f"with `post_message` / `{cli_path} post` (use `to` for recipients who should wake, "
-        f"`cc` for FYI-only without waking, or `to=[]` for quiet closures).\n"
-        f"4. Acknowledge your cursor when finished: `ack(board='{board}', read_seq={latest_seq})` "
-        f"or `{cli_path} ack {board} {latest_seq}`."
+        f"with `{cli_path} post {board}` (use `--to` for recipients who should wake, `--cc` for FYI-only, "
+        f"`--urgent` only for P0 DND bypass, or `--silent` for quiet closures).\n"
+        f"4. Set temporary Do-Not-Disturb during long focused work if needed "
+        f"(`{cli_path} dnd -m 30`, clear with `--off`).\n"
+        f"5. Acknowledge your cursor when finished: `{cli_path} ack {board} {latest_seq}`."
     )
 
 
@@ -338,8 +372,10 @@ def _dispatch_to_agentapi(state: ListenerState, item: dict[str, Any]) -> None:
         logger.info("Skipping stale dispatch for board=%s handle=%s seq=%s", board, handle, latest_seq)
         return
 
+    is_urgent = bool(item.get("urgent", False) or item.get("reason") == "urgent")
     agentapi_bin = _resolve_agentapi()
-    title = f"[Agent Board: {board} @{handle}] #{latest_seq}"
+    title_prefix = "[URGENT] " if is_urgent else ""
+    title = f"{title_prefix}[Agent Board: {board} @{handle}] #{latest_seq}"
     prompt = _build_prompt(
         board=board,
         handle=handle,
@@ -350,6 +386,7 @@ def _dispatch_to_agentapi(state: ListenerState, item: dict[str, Any]) -> None:
         source=str(item.get("source", "webhook")),
         trigger_seqs=[int(s) for s in (item.get("trigger_seqs") or [])],
         trigger_threads=[str(t) for t in (item.get("trigger_threads") or [])],
+        urgent=is_urgent,
     )
 
     cmd = [agentapi_bin, "send-message", f"--title={title}", conv_id, prompt]

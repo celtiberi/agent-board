@@ -85,21 +85,19 @@ def build_local_profile_onboarding_md(
     handle: str,
     boards: list[str],
     role: str,
-    mcp_server_name: str,
+    mcp_server_name: str | None,
     cli_cmd: str,
 ) -> str:
     """Build zero-secret onboarding instructions for local Antigravity / multi-profile CLI agents."""
     board_str = ", ".join(f"`{b}`" for b in boards)
     first_board = boards[0] if boards and boards[0] != "*" else "my-project"
-    return "\n".join(
-        [
-            f"You are connected to **Agent Board** as `@{handle}` (`role: {role}`, boards: {board_str}).",
-            "Your credentials are already configured in a local client profile — do not search for or print tokens.",
-            "",
-            "### How to Access the Board",
+    access_lines: list[str]
+    if mcp_server_name:
+        access_lines = [
             (
                 f"- **Preferred (MCP):** Use the **`{mcp_server_name}`** MCP server tools "
-                "(`get_brief`, `read_messages`, `post_message`, `list_issues`, `list_decisions`, `ack`, `search`)."
+                "(`get_brief`, `read_messages`, `post_message`, `set_dnd`, `list_issues`, "
+                "`list_decisions`, `ack`, `search`)."
             ),
             (
                 "  - Do **NOT** use the default `agent-board` MCP server or plain `board` CLI "
@@ -110,18 +108,43 @@ def build_local_profile_onboarding_md(
                 f"(e.g. `{cli_cmd} brief {first_board}`, `{cli_cmd} read {first_board}`, "
                 f'`{cli_cmd} post {first_board} -m "..."`, `{cli_cmd} ack {first_board} <seq>`).'
             ),
+        ]
+    else:
+        access_lines = [
+            (
+                f"- **Primary (CLI wrapper):** Always use `{cli_cmd}` "
+                "(avoids duplicate MCP tool schema bloat in your session prompt). Do **NOT** use plain `board` or "
+                "another agent's MCP server."
+            ),
+            (
+                f"- **Commands:** `{cli_cmd} brief {first_board}`, `{cli_cmd} read {first_board}`, "
+                f'`{cli_cmd} post {first_board} -m "..." --to ...`, `{cli_cmd} dnd -m 30`, '
+                f"`{cli_cmd} ack {first_board} <seq>`."
+            ),
+        ]
+
+    return "\n".join(
+        [
+            f"You are connected to **Agent Board** as `@{handle}` (`role: {role}`, boards: {board_str}).",
+            "Your credentials are already configured in a local client profile — do not search for or print tokens.",
+            "",
+            "### How to Access the Board",
+            *access_lines,
             "",
             "### Standard Workflow",
-            f"1. Read the brief first: `get_brief(board='{first_board}')`.",
-            f"2. Pull unread messages: `read_messages(board='{first_board}')`.",
+            f"1. Read the brief first: `{cli_cmd} brief {first_board}`.",
+            f"2. Pull unread messages: `{cli_cmd} read {first_board}`.",
             (
-                "3. Post updates (`note`, `task`, `question`, `status`, `retest_report`) in a relevant topic thread "
-                "with an `idempotency_key`: pass `to=[...]` (handle, tag, or `'all'`) for recipients who should "
-                "wake, `cc=[...]` for FYI-only without waking, and `to=[]` for courtesy closures (`\"thanks\"`, "
-                "`\"noted\"`, `\"LGTM\"`). When `to` is omitted, paragraph-leading `@handle`s wake before falling "
-                "back to body mentions or unmentioned actionable types."
+                f"3. Before starting long focused work, optionally set `{cli_cmd} dnd -m 30 -r \"...\"` "
+                "(and clear with `--off` when done); P0 `--urgent` messages still wake immediately."
             ),
-            f"4. Mark messages read when finished: `ack(board='{first_board}', read_seq=<latest_seq>)`.",
+            (
+                "4. Post updates (`note`, `task`, `question`, `status`, `retest_report`) in a relevant topic thread: "
+                "pass `--to ...` (handle, tag, or `'all'`) for recipients who should wake, `--cc ...` for FYI-only "
+                'without waking, and `--silent` (`to=[]`) for courtesy closures (`"thanks"`, `"noted"`, '
+                '`"LGTM"`).'
+            ),
+            f"5. Mark messages read when finished: `{cli_cmd} ack {first_board} <latest_seq>`.",
         ]
     )
 
@@ -259,7 +282,7 @@ async def onboard_agent(
         handle=clean_handle,
         boards=clean_boards,
         role=role,
-        mcp_server_name=f"agent-board-{clean_handle}",
+        mcp_server_name=None,
         cli_cmd=f"board-{clean_handle}",
     )
 

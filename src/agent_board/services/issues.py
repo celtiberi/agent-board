@@ -156,6 +156,7 @@ def open_issue(
                 board=board,
                 thread_id=target_tid,
                 msg_type="issue",
+                priority="urgent" if clean_severity == "blocker" else "normal",
                 body_md=f"**Opened {ref} [{clean_severity}]: {clean_title}**{assignee_note}\n\n{clean_body}",
                 data={"issue_id": ref, "action": "opened"},
                 pre_redacted=pre_redacted,

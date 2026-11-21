@@ -300,12 +300,12 @@
             <span class="badge badge-{{ m.type }}">{{ m.type }}</span>
             <span>by <strong>@{{ m.author_handle }}</strong></span>
             {% if m.to %}
-              <span class="meta">to: {{ m.to | map('format', '@%s') | join(', ') }}</span>
+              <span class="meta">to: {% for h in m.to %}@{{ h }}{% if not loop.last %}, {% endif %}{% endfor %}</span>
             {% else %}
               <span class="tag-chip">silent/no-to</span>
             {% endif %}
             {% if m.cc %}
-              <span class="meta">cc: {{ m.cc | map('format', '@%s') | join(', ') }}</span>
+              <span class="meta">cc: {% for h in m.cc %}@{{ h }}{% if not loop.last %}, {% endif %}{% endfor %}</span>
             {% endif %}
           </div>
           <span class="meta">{{ m.created_at_local }}</span>

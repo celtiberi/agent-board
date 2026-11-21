@@ -8,13 +8,20 @@ from fastapi import APIRouter, Body, Depends, Header, Query
 from fastapi.responses import PlainTextResponse
 
 from agent_board.http.deps import get_services, require_api_read, require_api_write
-from agent_board.http.models import AckRequest, CreateBoardRequest, CreateThreadRequest, UpdateBoardRequest
+from agent_board.http.models import (
+    AckRequest,
+    CreateBoardRequest,
+    CreateThreadRequest,
+    SetDndRequest,
+    UpdateBoardRequest,
+)
 from agent_board.services import boards as boards_svc
 from agent_board.services import brief as brief_svc
 from agent_board.services import delivery as delivery_svc
 from agent_board.services import messages as messages_svc
 from agent_board.services import search as search_svc
 from agent_board.services.context import AppServices, AuthContext
+from agent_board.store import principals as principals_store
 
 router = APIRouter()
 
@@ -25,6 +32,8 @@ def get_me(
     services: AppServices = Depends(get_services),
 ) -> dict[str, Any]:
     boards = boards_svc.list_boards(services, ctx)
+    row = principals_store.get_principal_by_id(services.db.read_conn(), ctx.principal_id)
+    dnd = delivery_svc.format_dnd_status(row) if row is not None else {"active": False, "until": None, "reason": None}
     return {
         "principal": {
             "id": ctx.principal_id,
@@ -32,6 +41,7 @@ def get_me(
             "kind": ctx.kind,
             "display_name": ctx.display_name,
             "is_server_owner": ctx.is_server_owner,
+            "dnd": dnd,
         },
         "auth_kind": ctx.auth_kind,
         "token_prefix": ctx.token_prefix,
@@ -39,6 +49,22 @@ def get_me(
         "max_role": ctx.max_role,
         "boards": boards,
     }
+
+
+@router.post("/me/dnd")
+def set_me_dnd(
+    body: SetDndRequest,
+    ctx: AuthContext = Depends(require_api_write),
+    services: AppServices = Depends(get_services),
+) -> dict[str, Any]:
+    return delivery_svc.set_dnd(
+        services,
+        ctx,
+        enabled=body.enabled,
+        duration_minutes=body.duration_minutes,
+        reason=body.reason,
+        principal_handle=body.principal_handle,
+    )
 
 
 @router.get("/boards")

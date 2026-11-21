@@ -6,8 +6,10 @@ import json
 import sqlite3
 from typing import Any
 
+from agent_board.ids import utc_now_iso
 from agent_board.services.auth import require_board_role
 from agent_board.services.context import AppServices, AuthContext
+from agent_board.services.delivery import format_dnd_status
 from agent_board.store import boards as boards_store
 from agent_board.store import decisions as decisions_store
 from agent_board.store import delivery as delivery_store
@@ -225,10 +227,10 @@ def _format_members_line(members: list[dict[str, Any]]) -> str:
     parts: list[str] = []
     for m in members:
         tags = m.get("tags") or []
-        if tags:
-            parts.append(f"@{m['handle']} [{', '.join(tags)}]")
-        else:
-            parts.append(f"@{m['handle']}")
+        entry = f"@{m['handle']} [{', '.join(tags)}]" if tags else f"@{m['handle']}"
+        if (m.get("dnd") or {}).get("active"):
+            entry += " (DND)"
+        parts.append(entry)
     return f"**Members:** {', '.join(parts)}"
 
 
@@ -428,11 +430,13 @@ def get_brief(services: AppServices, ctx: AuthContext, *, board_slug: str) -> di
             caller_handle=ctx.handle,
         )
         member_rows = boards_store.list_memberships_for_board(conn, board_id)
+        now_iso = utc_now_iso()
         members = [
             {
                 "handle": m["handle"],
                 "role": m["role"],
                 "tags": json.loads(m["tags"] if "tags" in m.keys() and m["tags"] else "[]"),
+                "dnd": format_dnd_status(m, now_iso=now_iso),
             }
             for m in member_rows
             if m["kind"] != "system" and m["disabled_at"] is None

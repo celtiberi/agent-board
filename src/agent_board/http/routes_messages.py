@@ -51,6 +51,7 @@ def post_message(
         ctx,
         board_slug=slug,
         msg_type=body.type,
+        priority=body.priority,
         body_md=body.body_md,
         thread_id=body.thread_id,
         thread_title=body.thread_title,

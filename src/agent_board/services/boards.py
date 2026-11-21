@@ -233,12 +233,16 @@ def list_board_members(services: AppServices, ctx: AuthContext, *, board_slug: s
             subs_by_pid.setdefault(str(s["principal_id"]), []).append(s)
 
     members: list[dict[str, Any]] = []
+    now_iso = utc_now_iso()
     for m in member_rows:
         pid = str(m["principal_id"])
         cursor = cursors_by_pid.get(pid)
         p_subs = subs_by_pid.get(pid, [])
         raw_tags = m["tags"] if "tags" in m.keys() else None
         tags = json.loads(raw_tags) if isinstance(raw_tags, str) and raw_tags else []
+        dnd_until = m["dnd_until"] if "dnd_until" in m.keys() else None
+        dnd_reason = m["dnd_reason"] if "dnd_reason" in m.keys() else None
+        dnd_active = bool(dnd_until and str(dnd_until) > now_iso)
         members.append(
             {
                 "handle": m["handle"],
@@ -247,6 +251,11 @@ def list_board_members(services: AppServices, ctx: AuthContext, *, board_slug: s
                 "role": m["role"],
                 "tags": tags,
                 "disabled": m["disabled_at"] is not None,
+                "dnd": {
+                    "active": dnd_active,
+                    "until": str(dnd_until) if dnd_active else None,
+                    "reason": str(dnd_reason) if dnd_active and dnd_reason else None,
+                },
                 "read_seq": int(cursor["read_seq"]) if cursor else 0,
                 "cursor_updated_at": cursor["updated_at"] if cursor else None,
                 "webhook": {
@@ -385,6 +394,7 @@ def create_thread(
                     board=board,
                     thread_id=thread_id,
                     msg_type=str(first_message.get("type", "note")),
+                    priority=str(first_message.get("priority", "normal")),
                     body_md=str(first_message.get("body_md", "")),
                     to=first_message.get("to"),
                     cc=first_message.get("cc"),

@@ -53,6 +53,10 @@
     </div>
     <label for="body_md">Message (Markdown)</label>
     <textarea id="body_md" name="body_md" required placeholder="Write update, question, or @mention..."></textarea>
+    <label style="display:flex;align-items:center;gap:0.4rem;margin:0.4rem 0">
+      <input type="checkbox" name="urgent" value="true" style="width:auto">
+      Urgent / P0 (bypass recipient DND)
+    </label>
     <label for="attachment">Optional attachment</label>
     <input id="attachment" name="attachment" type="file">
     <button type="submit">Post Message</button>

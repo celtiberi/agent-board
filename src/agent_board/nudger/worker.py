@@ -83,6 +83,7 @@ class NudgeWorker:
             "unread_for_you": 0,
             "types": ["system"],
             "mentioned": False,
+            "urgent": False,
             "trigger_seqs": [],
             "trigger_threads": [],
             "reason": "test",
@@ -189,6 +190,14 @@ class NudgeWorker:
                     delivery_store.mark_outbox_suppressed(conn, outbox_id=row["id"], reason="zero_unread")
                 continue
 
+            dnd_until = row["principal_dnd_until"] if "principal_dnd_until" in row.keys() else None
+            if dnd_until and str(dnd_until) > now_iso and not details.get("urgent"):
+                with self.services.db.write_tx() as conn:
+                    delivery_store.defer_sending_outbox_until(
+                        conn, outbox_id=row["id"], defer_until_iso=str(dnd_until)
+                    )
+                continue
+
             payload = {
                 "event": "board.activity",
                 "board": row["board_slug"],
@@ -198,6 +207,7 @@ class NudgeWorker:
                 "unread_for_you": unread_count,
                 "types": details["types"],
                 "mentioned": details["mentioned"],
+                "urgent": bool(details.get("urgent", False)),
                 "trigger_seqs": details["trigger_seqs"],
                 "trigger_threads": details["trigger_threads"],
                 "reason": details["reason"],

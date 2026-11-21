@@ -143,7 +143,11 @@ def _format_message_line(m: dict[str, Any]) -> str:
     if cc_list:
         env_parts.append("cc: " + ", ".join(f"@{h}" for h in cc_list))
     env_suffix = f" [{' | '.join(env_parts)}]" if env_parts else ""
-    return f"#{m['seq']} [{m['type']}] @{m['author_handle']} ({m['thread_title']}){env_suffix}: {m['body_md']}"
+    urgent_tag = "[URGENT] " if m.get("priority") == "urgent" else ""
+    return (
+        f"#{m['seq']} {urgent_tag}[{m['type']}] @{m['author_handle']} "
+        f"({m['thread_title']}){env_suffix}: {m['body_md']}"
+    )
 
 
 @client_app.command()
@@ -188,6 +192,7 @@ def post(
     to: str | None = typer.Option(None, "--to", help="Comma-separated recipients to wake (pass '' for none)."),
     cc: str | None = typer.Option(None, "--cc", help="Comma-separated FYI recipients (never wakes)."),
     silent: bool = typer.Option(False, "--silent", help="Set to=[] so no recipients wake."),
+    urgent: bool = typer.Option(False, "--urgent", help="Mark urgent (P0); bypasses recipient DND."),
     idempotency_key: str | None = typer.Option(None, "--idempotency-key"),
 ) -> None:
     """Post a message to a board."""
@@ -195,8 +200,15 @@ def post(
     if silent:
         if parsed_to:
             raise typer.BadParameter("Cannot combine --silent with non-empty --to")
+        if urgent:
+            raise typer.BadParameter("Cannot combine --urgent with --silent")
         parsed_to = []
-    payload: dict[str, Any] = {"thread_title": thread, "type": msg_type, "body_md": message}
+    payload: dict[str, Any] = {
+        "thread_title": thread,
+        "type": msg_type,
+        "priority": "urgent" if urgent else "normal",
+        "body_md": message,
+    }
     if parsed_to is not None:
         payload["to"] = parsed_to
     if cc is not None:
@@ -212,6 +224,29 @@ def post(
             )
         )
     typer.echo(f"Posted #{data['seq']} ({data['id']})")
+
+
+@client_app.command()
+def dnd(
+    minutes: int = typer.Option(30, "--minutes", "-m", help="Minutes to hold non-urgent wakes (1-240)."),
+    reason: str | None = typer.Option(None, "--reason", "-r", help="Optional reason shown to teammates."),
+    off: bool = typer.Option(False, "--off", help="Clear DND and expedite deferred wakes."),
+    status: bool = typer.Option(False, "--status", help="Show current DND status without changing it."),
+) -> None:
+    """Set, inspect, or clear Do-Not-Disturb wake deferral for the current profile."""
+    with _client() as c:
+        if status:
+            me_data = _check_resp(c.get("/me"))
+            dnd_info = me_data.get("principal", {}).get("dnd") or {"active": False, "until": None, "reason": None}
+            typer.echo(json.dumps(dnd_info, indent=2))
+            return
+        payload: dict[str, Any] = {"enabled": not off}
+        if not off:
+            payload["duration_minutes"] = minutes
+            if reason is not None:
+                payload["reason"] = reason
+        res = _check_resp(c.post("/me/dnd", json=payload))
+    typer.echo(json.dumps(res, indent=2))
 
 
 @client_app.command()
@@ -306,6 +341,77 @@ def mcp_stdio() -> None:
 
     url, token = _load_config()
     anyio.run(_run_mcp_stdio, url, token)
+
+
+@client_app.command("telemetry")
+def telemetry(
+    brain_dir: Path = typer.Option(
+        Path("~/.gemini/antigravity/brain").expanduser(),
+        "--brain-dir",
+        help="Path to Antigravity brain directory.",
+    ),
+    active_conversations: Path = typer.Option(
+        Path("~/.config/agent-board/active_conversations.json").expanduser(),
+        "--active-conversations",
+        help="Path to active_conversations.json mapping UUIDs to handles.",
+    ),
+    host_id: str | None = typer.Option(None, "--host-id", help="Override reported host identifier."),
+    push: bool = typer.Option(False, "--push", help="Upload sanitized metrics snapshot to /api/v1/admin/telemetry."),
+    alert_board: str | None = typer.Option(
+        None, "--alert-board", help="Optional board slug to notify on threshold breach (e.g. ops)."
+    ),
+    alert_to: str = typer.Option("tool-master", "--alert-to", help="Recipient handle for telemetry alerts."),
+    cooldown_hours: float = typer.Option(
+        4.0, "--cooldown-hours", help="Minimum hours between repeat alerts for the same condition."
+    ),
+    json_out: bool = typer.Option(False, "--json", help="Print full JSON snapshot."),
+) -> None:
+    """Scan Antigravity transcript logs with zero LLM calls and optionally push / alert."""
+    from agent_board.telemetry import collect_antigravity_telemetry, dispatch_telemetry_alerts
+
+    snap = collect_antigravity_telemetry(
+        brain_dir=brain_dir.expanduser(),
+        active_conversations_path=active_conversations.expanduser(),
+        host_id=host_id,
+    )
+    dispatched: list[dict[str, Any]] = []
+    if push or alert_board:
+        with _client() as c:
+            if push:
+                _check_resp(c.post("/admin/telemetry", json=snap))
+            if alert_board:
+                state_path = Path("~/.config/agent-board/telemetry_alert_state.json").expanduser()
+                dispatched = dispatch_telemetry_alerts(
+                    snap,
+                    client=c,
+                    alert_board=alert_board,
+                    alert_to=alert_to,
+                    state_path=state_path,
+                    cooldown_hours=cooldown_hours,
+                )
+
+    if json_out:
+        out = {**snap, "alerts_dispatched": len(dispatched)}
+        typer.echo(json.dumps(out, indent=2))
+        return
+
+    g = snap["global"]
+    hit_str = f"{g['hit_rate_5h']}%" if g["hit_rate_5h"] is not None else "—"
+    typer.echo(
+        f"Host {snap['host_id']} · 5h uncached={g['uncached_5h']:,} · hit={hit_str} · "
+        f"partial_collapses={g['partial_collapses_5h']} · sessions={g['sessions_scanned']}"
+    )
+    for handle, info in sorted(snap["agents"].items()):
+        ah = f"{info['hit_rate_5h']}%" if info["hit_rate_5h"] is not None else "—"
+        typer.echo(
+            f"  @{handle:14} ctx={info['live_context_tokens'] // 1000:4d}k  "
+            f"5h_uncached={info['uncached_5h']:9,}  hit={ah:>6}  "
+            f"webhook_5h={info['webhook_uncached_5h']:9,}  collapses={info['partial_collapses_5h']}"
+        )
+    if snap["alerts"]:
+        typer.echo(f"Alerts ({len(snap['alerts'])} active, {len(dispatched)} posted):")
+        for a in snap["alerts"]:
+            typer.echo(f"  [{a['severity'].upper()}] {a['message']}")
 
 
 @client_app.command("sidecar")

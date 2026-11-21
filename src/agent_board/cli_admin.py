@@ -254,6 +254,11 @@ def admin_onboard(
     skip_plain_notes: bool = typer.Option(
         True, "--skip-notes/--all-messages", help="Skip plain unmentioned notes on webhook."
     ),
+    register_mcp: bool = typer.Option(
+        False,
+        "--register-mcp/--no-register-mcp",
+        help="Also register agent-board-<handle> in ~/.gemini/config/mcp_config.json (default off; prefer CLI).",
+    ),
     rotate: bool = typer.Option(True, "--rotate/--keep-tokens", help="Revoke prior active tokens for this handle."),
     strict: bool = typer.Option(True, "--strict/--no-strict", help="Remove memberships outside --board."),
     json_out: bool = typer.Option(False, "--json"),
@@ -304,8 +309,18 @@ def admin_onboard(
             data["principal_handle"],
             base_url,
             new_token,
-            register_antigravity_mcp=(clean_target == "antigravity"),
+            register_antigravity_mcp=(clean_target == "antigravity" and register_mcp),
         )
+        if register_mcp:
+            from agent_board.services.onboarding import build_local_profile_onboarding_md
+
+            data["local_profile_onboarding_md"] = build_local_profile_onboarding_md(
+                handle=data["principal_handle"],
+                boards=clean_boards,
+                role=role,
+                mcp_server_name=local_info.get("mcp_server_name"),
+                cli_cmd=local_info["cli_cmd"],
+            )
         me_resp = httpx.get(
             f"{base_url}/api/v1/me",
             headers={"Authorization": f"Bearer {new_token}"},

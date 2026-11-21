@@ -13,8 +13,10 @@ from agent_board.errors import ValidationError
 from agent_board.ids import dt_to_iso, iso_to_dt, utc_now
 from agent_board.services.auth import require_server_owner
 from agent_board.services.context import AppServices, AuthContext
+from agent_board.services.delivery import format_dnd_status
 from agent_board.store import delivery as delivery_store
 from agent_board.store import messages as messages_store
+from agent_board.store import telemetry as telemetry_store
 from agent_board.web.rendering import format_chicago_time
 
 _CHICAGO = ZoneInfo("America/Chicago")
@@ -115,9 +117,11 @@ def _load_boards_and_handles(
 def _load_agent_matrix(
     conn: sqlite3.Connection,
     *,
+    now_iso: str,
     cutoff_iso: str,
     board_slug: str | None,
     agent_handle: str | None,
+    telemetry: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     clauses = ["b.archived_at IS NULL", "p.kind != 'system'", "p.disabled_at IS NULL"]
     params: list[object] = []
@@ -133,6 +137,7 @@ def _load_agent_matrix(
         f"""
         SELECT b.id AS board_id, b.slug AS board_slug, b.next_seq,
                p.id AS principal_id, p.handle, p.display_name, p.kind, p.tags,
+               p.dnd_until, p.dnd_reason,
                mb.role,
                c.read_seq AS cursor_read_seq,
                c.updated_at AS cursor_updated_at
@@ -230,6 +235,24 @@ def _load_agent_matrix(
             health = "healthy"
 
         raw_tags = row["tags"] if "tags" in row.keys() and row["tags"] else "[]"
+        dnd_raw = format_dnd_status(row, now_iso=now_iso)
+        dnd_info = {
+            **dnd_raw,
+            "until_local": format_chicago_time(dnd_raw["until"]) if dnd_raw["active"] else None,
+        }
+        tel_agents = (telemetry or {}).get("agents") or {}
+        tel_agent = tel_agents.get(str(row["handle"]))
+        tel_summary = (
+            {
+                "live_context_tokens": int(tel_agent.get("live_context_tokens", 0)),
+                "uncached_5h": int(tel_agent.get("uncached_5h", 0)),
+                "hit_rate_5h": tel_agent.get("hit_rate_5h"),
+                "partial_collapses_5h": int(tel_agent.get("partial_collapses_5h", 0)),
+                "alerts": list(tel_agent.get("alerts") or []),
+            }
+            if isinstance(tel_agent, dict)
+            else None
+        )
         matrix.append(
             {
                 "board_slug": bslug,
@@ -238,6 +261,8 @@ def _load_agent_matrix(
                 "kind": row["kind"],
                 "role": row["role"],
                 "tags": json.loads(raw_tags),
+                "dnd": dnd_info,
+                "telemetry": tel_summary,
                 "read_seq": read_seq,
                 "latest_seq": latest_seq,
                 "unread_lag": unread_lag,
@@ -586,7 +611,7 @@ def _load_feed(
     where_sql, params = _msg_filter_clause(board_slug, agent_handle)
     rows = conn.execute(
         f"""
-        SELECT m.id, m.seq, m.type, m.body_md, m.created_at, m.thread_id,
+        SELECT m.id, m.seq, m.type, m.priority, m.body_md, m.created_at, m.thread_id,
                b.slug AS board_slug, t.title AS thread_title, p.handle AS author_handle
         FROM messages m
         JOIN boards b ON b.id = m.board_id
@@ -610,6 +635,7 @@ def _load_feed(
             "seq": int(r["seq"]),
             "author_handle": r["author_handle"],
             "type": r["type"],
+            "priority": r["priority"] if "priority" in r.keys() and r["priority"] else "normal",
             "to": to_map.get(r["id"], []),
             "cc": cc_map.get(r["id"], []),
             "body_preview": _headline(r["body_md"]),
@@ -643,9 +669,27 @@ def get_monitor_snapshot(
     cutoff_iso = dt_to_iso(now - timedelta(hours=hours))
 
     with services.db.read_snapshot() as conn:
+        tel_rows = telemetry_store.list_telemetry_snapshots(conn)
+        telemetry: dict[str, Any] | None = None
+        if tel_rows:
+            tel_payload = json.loads(tel_rows[0]["payload_json"])
+            telemetry = {
+                "host_id": tel_rows[0]["host_id"],
+                "reported_at": tel_rows[0]["reported_at"],
+                "reported_at_local": format_chicago_time(tel_rows[0]["reported_at"]),
+                "global": tel_payload.get("global", {}),
+                "alerts": tel_payload.get("alerts", []),
+                "agents": tel_payload.get("agents", {}),
+            }
+
         boards, handles = _load_boards_and_handles(conn, cutoff_iso=cutoff_iso)
         agent_matrix = _load_agent_matrix(
-            conn, cutoff_iso=cutoff_iso, board_slug=clean_board, agent_handle=clean_agent
+            conn,
+            now_iso=now_iso,
+            cutoff_iso=cutoff_iso,
+            board_slug=clean_board,
+            agent_handle=clean_agent,
+            telemetry=telemetry,
         )
         timeline, metrics = _load_timeline_and_metrics(
             conn,
@@ -698,4 +742,5 @@ def get_monitor_snapshot(
         "open_issues": open_issues,
         "recent_outbox": recent_outbox,
         "feed": feed,
+        "telemetry": telemetry,
     }

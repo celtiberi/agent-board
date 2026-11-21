@@ -34,6 +34,7 @@ class UpdateBoardRequest(BaseModel):
 
 class FirstMessageInput(BaseModel):
     type: str = "note"
+    priority: str = "normal"
     body_md: str
     to: list[str] | None = None
     cc: list[str] | None = None
@@ -58,6 +59,7 @@ class PostMessageRequest(BaseModel):
     thread_id: str | None = None
     thread_title: str | None = None
     type: str = "note"
+    priority: str = "normal"
     body_md: str = Field(validation_alias=AliasChoices("body_md", "body", "content", "message"))
     to: list[str] | None = None
     cc: list[str] | None = None
@@ -224,3 +226,21 @@ class OnboardAgentRequest(BaseModel):
     webhook_auth_header: str | None = None
     skip_plain_notes: bool = True
     test_webhook: bool = True
+
+
+class SetDndRequest(BaseModel):
+    enabled: bool = True
+    duration_minutes: int | None = None
+    reason: str | None = None
+    principal_handle: str | None = None
+
+
+class TelemetrySnapshotRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra="allow")
+
+    host_id: str
+    collected_at: str | None = None
+    thresholds: dict[str, Any] = Field(default_factory=dict)
+    global_summary: dict[str, Any] = Field(default_factory=dict, alias="global")
+    agents: dict[str, Any] = Field(default_factory=dict)
+    alerts: list[dict[str, Any]] = Field(default_factory=list)

@@ -34,6 +34,7 @@ VALID_MESSAGE_TYPES = frozenset(
     }
 )
 DIRECT_POST_TYPES = frozenset({"note", "task", "question", "status", "retest_report", "summary"})
+VALID_PRIORITIES = frozenset({"normal", "urgent"})
 _MENTION_RE = re.compile(r"(?<![A-Za-z0-9_.-])@([a-z0-9][a-z0-9_-]{0,48}[a-z0-9]?)")
 _FENCE_LINE_RE = re.compile(r"^\s*(`{3,}|~{3,})(.*)$")
 _LEADING_HANDLE_RE = re.compile(
@@ -248,6 +249,7 @@ def _hydrate_messages(conn: sqlite3.Connection, rows: list[sqlite3.Row]) -> list
                 "author_id": r["author_id"],
                 "author_handle": r["author_handle"],
                 "type": r["type"],
+                "priority": r["priority"] if "priority" in keys and r["priority"] else "normal",
                 "body_md": r["body_md"],
                 "data": json.loads(r["data"]) if r["data"] is not None else None,
                 "warnings": json.loads(r["warnings_json"]),
@@ -340,6 +342,7 @@ def post_message_in_tx(
     ctx: AuthContext,
     board: sqlite3.Row,
     msg_type: str,
+    priority: str = "normal",
     body_md: str,
     thread_id: str | None = None,
     thread_title: str | None = None,
@@ -354,6 +357,9 @@ def post_message_in_tx(
 ) -> dict[str, Any]:
     if msg_type not in VALID_MESSAGE_TYPES:
         raise ValidationError(f"Invalid message type '{msg_type}'")
+    clean_priority = (priority or "normal").strip().lower()
+    if clean_priority not in VALID_PRIORITIES:
+        raise ValidationError("priority must be 'normal' or 'urgent'")
     if not body_md or not body_md.strip():
         raise ValidationError("body_md must not be empty")
     if len(body_md.encode("utf-8")) > services.settings.max_message_bytes:
@@ -413,6 +419,7 @@ def post_message_in_tx(
         seq=seq,
         author_id=ctx.principal_id,
         msg_type=msg_type,
+        priority=clean_priority,
         body_md=clean_body,
         data_json=json.dumps(clean_data) if clean_data is not None else None,
         warnings_json=json.dumps(warnings),
@@ -464,6 +471,7 @@ def post_message_in_tx(
             seq=seq,
             author_id=ctx.principal_id,
             msg_type=msg_type,
+            priority=clean_priority,
             mentioned_principal_ids=set(to_ids),
             is_broadcast=is_broadcast,
             is_directed=is_directed,
@@ -481,6 +489,7 @@ def post_message(
     board_slug: str,
     msg_type: str,
     body_md: str,
+    priority: str = "normal",
     thread_id: str | None = None,
     thread_title: str | None = None,
     to: list[str] | None = None,
@@ -492,6 +501,9 @@ def post_message(
 ) -> dict[str, Any]:
     if msg_type not in DIRECT_POST_TYPES:
         raise ValidationError(f"Type '{msg_type}' cannot be posted directly; use record_decision or issue tools")
+    clean_priority = (priority or "normal").strip().lower()
+    if clean_priority not in VALID_PRIORITIES:
+        raise ValidationError("priority must be 'normal' or 'urgent'")
 
     clean_body, clean_title, clean_data, pre_redacted = _scrub_message_fields(
         services,
@@ -511,6 +523,7 @@ def post_message(
                 ctx=ctx,
                 board=board,
                 msg_type=msg_type,
+                priority=clean_priority,
                 body_md=clean_body,
                 thread_id=thread_id,
                 thread_title=clean_title,
@@ -528,7 +541,7 @@ def post_message(
                 ok=True,
                 board_id=board["id"],
                 target=msg["id"],
-                detail={"seq": msg["seq"], "type": msg_type},
+                detail={"seq": msg["seq"], "type": msg_type, "priority": clean_priority},
             )
             return msg
 
@@ -541,6 +554,7 @@ def post_message(
                 "thread_id": thread_id,
                 "thread_title": clean_title,
                 "type": msg_type,
+                "priority": clean_priority,
                 "body_md": clean_body,
                 "to": to,
                 "cc": cc,
@@ -623,6 +637,7 @@ def edit_message(
 
             new_id = new_ulid()
             seq = boards_store.allocate_next_seq(conn, board["id"])
+            target_priority = target["priority"] if "priority" in target.keys() and target["priority"] else "normal"
             root_rowid = messages_store.insert_message(
                 conn,
                 message_id=new_id,
@@ -631,6 +646,7 @@ def edit_message(
                 seq=seq,
                 author_id=ctx.principal_id,
                 msg_type=target["type"],
+                priority=target_priority,
                 body_md=clean_body,
                 data_json=json.dumps(clean_data) if clean_data is not None else None,
                 warnings_json=json.dumps(warnings),
@@ -673,6 +689,7 @@ def edit_message(
                 seq=seq,
                 author_id=ctx.principal_id,
                 msg_type=target["type"],
+                priority=target_priority,
                 mentioned_principal_ids=set(to_ids),
                 is_broadcast=is_broadcast,
                 is_directed=is_directed,

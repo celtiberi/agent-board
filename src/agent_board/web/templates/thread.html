@@ -25,6 +25,9 @@
   <div class="msg-header">
     <div>
       <span class="badge badge-{{ m.type }}">{{ m.type }}</span>
+      {% if m.priority == 'urgent' %}
+        <span class="badge badge-blocker">URGENT</span>
+      {% endif %}
       <strong>@{{ m.author_handle }}</strong>
       {% if m.to %}
         <span class="badge">to: {% for h in m.to %}@{{ h }}{% if not loop.last %}, {% endif %}{% endfor %}</span>
@@ -141,10 +144,14 @@
         <label for="cc_handles">Cc (FYI only; never wakes)</label>
         <input id="cc_handles" name="cc_handles" type="text" placeholder="Optional handle(s) or tag">
       </div>
-      <div style="display:flex;align-items:flex-end;padding-bottom:0.4rem">
+      <div style="display:flex;align-items:flex-end;gap:0.85rem;padding-bottom:0.4rem;flex-wrap:wrap">
         <label style="display:flex;align-items:center;gap:0.4rem;margin:0">
           <input type="checkbox" name="silent" value="true" style="width:auto">
           Silent (<code>to=[]</code>, wake nobody)
+        </label>
+        <label style="display:flex;align-items:center;gap:0.4rem;margin:0">
+          <input type="checkbox" name="urgent" value="true" style="width:auto">
+          Urgent / P0 (bypass DND)
         </label>
       </div>
     </div>

@@ -10,11 +10,15 @@ from typing import Any
 from urllib.parse import urlparse
 
 from agent_board.errors import NotFoundError, PermissionDeniedError, ValidationError
-from agent_board.ids import dt_to_iso, iso_to_dt, new_ulid, utc_now_iso
+from agent_board.ids import dt_to_iso, iso_to_dt, new_ulid, utc_now, utc_now_iso
 from agent_board.services.auth import record_audit, require_board_role
 from agent_board.services.context import AppServices, AuthContext
 from agent_board.services.idempotency import execute_idempotent
 from agent_board.store import delivery as delivery_store
+from agent_board.store import principals as principals_store
+
+MAX_DND_MINUTES = 240
+DEFAULT_DND_MINUTES = 30
 
 
 def get_cursor_status(
@@ -144,6 +148,85 @@ def subscription_matches_message(
     return True
 
 
+def format_dnd_status(principal_row: sqlite3.Row, *, now_iso: str | None = None) -> dict[str, Any]:
+    """Return active DND state for a principal row (auto-expiring once past dnd_until)."""
+    keys = set(principal_row.keys())
+    until = principal_row["dnd_until"] if "dnd_until" in keys else None
+    reason = principal_row["dnd_reason"] if "dnd_reason" in keys else None
+    ref_iso = now_iso or utc_now_iso()
+    active = bool(until and str(until) > ref_iso)
+    return {
+        "active": active,
+        "until": str(until) if active else None,
+        "reason": str(reason) if active and reason else None,
+    }
+
+
+def set_dnd(
+    services: AppServices,
+    ctx: AuthContext,
+    *,
+    enabled: bool = True,
+    duration_minutes: int | None = None,
+    reason: str | None = None,
+    principal_handle: str | None = None,
+) -> dict[str, Any]:
+    """Enable finite Do-Not-Disturb wake deferral or clear it and expedite pending wakes."""
+    target_handle = principal_handle.strip().lstrip("@").lower() if principal_handle else ctx.handle
+    if target_handle != ctx.handle:
+        if not ctx.is_server_owner:
+            raise PermissionDeniedError("Only the server owner can manage another principal's DND")
+    elif not ctx.is_server_owner and ctx.max_role == "readonly":
+        raise PermissionDeniedError("Readonly tokens cannot modify DND status")
+
+    if enabled:
+        mins = DEFAULT_DND_MINUTES if duration_minutes is None else int(duration_minutes)
+        if mins < 1 or mins > MAX_DND_MINUTES:
+            raise ValidationError(f"duration_minutes must be between 1 and {MAX_DND_MINUTES}")
+        raw_reason = (reason or "").strip()
+        clean_reason: str | None = None
+        if raw_reason:
+            scrubbed, _ = services.redactor.scrub_text(raw_reason)
+            clean_reason = " ".join(scrubbed.split())[:140] or None
+    else:
+        mins = 0
+        clean_reason = None
+
+    with services.db.write_tx() as conn:
+        target = principals_store.get_principal_by_handle(conn, target_handle)
+        if target is None or target["kind"] == "system":
+            raise NotFoundError(f"Principal '{target_handle}' not found")
+        now_dt = utc_now()
+        now_iso = dt_to_iso(now_dt)
+        expedited = 0
+        if enabled:
+            dnd_until: str | None = dt_to_iso(now_dt + timedelta(minutes=mins))
+            principals_store.update_principal_dnd(
+                conn, target["id"], dnd_until=dnd_until, dnd_reason=clean_reason
+            )
+        else:
+            dnd_until = None
+            principals_store.update_principal_dnd(conn, target["id"], dnd_until=None, dnd_reason=None)
+            expedited = delivery_store.expedite_pending_outbox_for_principal(
+                conn, principal_id=target["id"], now_iso=now_iso
+            )
+        record_audit(
+            conn,
+            ctx=ctx,
+            action="principal.dnd",
+            ok=True,
+            target=target["handle"],
+            detail={"enabled": enabled, "dnd_until": dnd_until, "reason": clean_reason, "expedited": expedited},
+        )
+        return {
+            "handle": target["handle"],
+            "dnd_active": enabled,
+            "dnd_until": dnd_until,
+            "dnd_reason": clean_reason,
+            "expedited_outbox": expedited,
+        }
+
+
 def enqueue_outbox_for_message(
     conn: sqlite3.Connection,
     *,
@@ -152,6 +235,7 @@ def enqueue_outbox_for_message(
     seq: int,
     author_id: str,
     msg_type: str,
+    priority: str = "normal",
     mentioned_principal_ids: set[str],
     is_broadcast: bool = False,
     is_directed: bool = False,
@@ -159,6 +243,7 @@ def enqueue_outbox_for_message(
 ) -> None:
     """Enqueue or coalesce outbox nudges inside the caller's write transaction."""
     now_dt = iso_to_dt(now_iso)
+    is_urgent = priority == "urgent"
     subs = delivery_store.list_active_subscriptions_for_board(conn, board_id)
     for sub in subs:
         if not subscription_matches_message(
@@ -171,15 +256,23 @@ def enqueue_outbox_for_message(
             is_directed=is_directed,
         ):
             continue
-        debounce_dt = now_dt + timedelta(seconds=int(sub["debounce_s"]))
-        next_attempt = debounce_dt
-        if sub["last_sent_at"]:
-            interval_dt = iso_to_dt(sub["last_sent_at"]) + timedelta(seconds=int(sub["min_interval_s"]))
-            next_attempt = max(next_attempt, interval_dt)
-        if int(sub["failure_count"]) > 0 and sub["updated_at"]:
-            reprobe_floor_s = max(int(sub["min_interval_s"]), 300)
-            reprobe_dt = iso_to_dt(sub["updated_at"]) + timedelta(seconds=reprobe_floor_s)
-            next_attempt = max(next_attempt, reprobe_dt)
+        if is_urgent:
+            next_attempt = now_dt
+        else:
+            debounce_dt = now_dt + timedelta(seconds=int(sub["debounce_s"]))
+            next_attempt = debounce_dt
+            if sub["last_sent_at"]:
+                interval_dt = iso_to_dt(sub["last_sent_at"]) + timedelta(seconds=int(sub["min_interval_s"]))
+                next_attempt = max(next_attempt, interval_dt)
+            if int(sub["failure_count"]) > 0 and sub["updated_at"]:
+                reprobe_floor_s = max(int(sub["min_interval_s"]), 300)
+                reprobe_dt = iso_to_dt(sub["updated_at"]) + timedelta(seconds=reprobe_floor_s)
+                next_attempt = max(next_attempt, reprobe_dt)
+            dnd_until_raw = sub["principal_dnd_until"] if "principal_dnd_until" in sub.keys() else None
+            if dnd_until_raw:
+                dnd_dt = iso_to_dt(str(dnd_until_raw))
+                if dnd_dt > next_attempt:
+                    next_attempt = dnd_dt
 
         delivery_store.enqueue_outbox_pending(
             conn,
@@ -189,6 +282,7 @@ def enqueue_outbox_for_message(
             latest_seq=seq,
             next_attempt_at=dt_to_iso(next_attempt),
             created_at=now_iso,
+            urgent=is_urgent,
         )
 
 

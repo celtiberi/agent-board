@@ -35,6 +35,7 @@ _WRITE_METHODS = frozenset(
         "post_message",
         "edit_message",
         "ack",
+        "set_dnd",
         "record_decision",
         "supersede_decision",
         "open_issue",
@@ -161,7 +162,8 @@ def build_mcp_server(services: AppServices) -> tuple[MCPServer, ASGIApp]:
             "Pass thread_id or thread_title (defaults to 'general'; use distinct topic threads per workstream). "
             "Routing envelope: pass `to` (list of handles, tags, or 'all') for recipients who should wake and act, "
             "`cc` for FYI visibility without waking, and `to=[]` for courtesy closures ('thanks', 'noted', 'LGTM') "
-            "or quiet logs so nobody wakes. If `to` is omitted, paragraph-leading `@handle`s wake before falling "
+            "or quiet logs so nobody wakes. Pass `priority='urgent'` only for P0 emergencies that must bypass "
+            "recipient Do-Not-Disturb. If `to` is omitted, paragraph-leading `@handle`s wake before falling "
             "back to body mentions or unmentioned actionable types."
         )
     )
@@ -169,6 +171,7 @@ def build_mcp_server(services: AppServices) -> tuple[MCPServer, ASGIApp]:
         board: str,
         type: str,
         body_md: str,
+        priority: str = "normal",
         thread_id: str | None = None,
         thread_title: str | None = None,
         to: list[str] | None = None,
@@ -186,6 +189,7 @@ def build_mcp_server(services: AppServices) -> tuple[MCPServer, ASGIApp]:
                 ctx,
                 board_slug=board,
                 msg_type=type,
+                priority=priority,
                 body_md=body_md,
                 thread_id=thread_id,
                 thread_title=thread_title,
@@ -231,6 +235,30 @@ def build_mcp_server(services: AppServices) -> tuple[MCPServer, ASGIApp]:
             is_write=True,
             fn=lambda ctx: delivery_svc.ack_cursor(
                 services, ctx, board_slug=board, read_seq=read_seq, idempotency_key=idempotency_key
+            ),
+        )
+
+    @mcp.tool(
+        description=(
+            "Set caller Do-Not-Disturb (`enabled=True`, default 30m, max 240m) to hold/coalesce non-urgent "
+            "webhooks during focused work, or clear (`enabled=False`) to resume and expedite deferred wakes. "
+            "Urgent (P0) messages still bypass DND."
+        )
+    )
+    def set_dnd(
+        enabled: bool = True,
+        duration_minutes: int = 30,
+        reason: str | None = None,
+    ) -> dict[str, Any]:
+        return _run_tool(
+            services,
+            is_write=True,
+            fn=lambda ctx: delivery_svc.set_dnd(
+                services,
+                ctx,
+                enabled=enabled,
+                duration_minutes=duration_minutes,
+                reason=reason,
             ),
         )
 

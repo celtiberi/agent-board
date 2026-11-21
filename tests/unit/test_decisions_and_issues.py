@@ -176,3 +176,43 @@ def test_issues_lifecycle_and_retest_linkage(env: BoardTestEnv) -> None:
         "resolved",
         "reopened",
     ]
+
+
+def test_decision_title_strips_redundant_prefix_only(env: BoardTestEnv) -> None:
+    d1 = decisions_svc.record_decision(
+        env.services,
+        env.owner_ctx,
+        board_slug="alpha",
+        title="D-23: Use Postgres WAL",
+        statement="Use WAL for durable checkpoints.",
+        decided_by="owner",
+        decided_on="2026-11-21",
+    )
+    assert d1["ref"] == "D-1"
+    assert d1["title"] == "Use Postgres WAL"
+
+    d2 = decisions_svc.supersede_decision(
+        env.services,
+        env.owner_ctx,
+        board_slug="alpha",
+        old_ref="D-1",
+        title="d-9 — Use SQLite WAL mode",
+        statement="Use SQLite WAL mode for embedded coordination.",
+        decided_by="owner",
+        decided_on="2026-11-21",
+        reason="Simpler single-node deployment",
+    )
+    assert d2["ref"] == "D-2"
+    assert d2["title"] == "Use SQLite WAL mode"
+
+    d3 = decisions_svc.record_decision(
+        env.services,
+        env.owner_ctx,
+        board_slug="alpha",
+        title="D-16 (clarified): Keep YAML schema strict",
+        statement="Preserve qualified prefix when caller notes clarification.",
+        decided_by="owner",
+        decided_on="2026-11-21",
+    )
+    assert d3["ref"] == "D-3"
+    assert d3["title"] == "D-16 (clarified): Keep YAML schema strict"

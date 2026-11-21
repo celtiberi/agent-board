@@ -446,6 +446,16 @@ def post_message_in_tx(
         principal_id=ctx.principal_id,
         now_iso=ts,
     )
+    if ctx.auth_kind != "system":
+        cur_seq = delivery_store.get_cursor(conn, ctx.principal_id, board["id"])
+        if cur_seq > 0 and cur_seq == seq - 1:
+            delivery_store.upsert_cursor(
+                conn,
+                principal_id=ctx.principal_id,
+                board_id=board["id"],
+                read_seq=seq,
+                updated_at=ts,
+            )
     if not suppress_wake:
         enqueue_outbox_for_message(
             conn,
@@ -646,6 +656,16 @@ def edit_message(
                 principal_id=ctx.principal_id,
                 now_iso=now_iso,
             )
+            if ctx.auth_kind != "system":
+                cur_seq = delivery_store.get_cursor(conn, ctx.principal_id, board["id"])
+                if cur_seq > 0 and cur_seq == seq - 1:
+                    delivery_store.upsert_cursor(
+                        conn,
+                        principal_id=ctx.principal_id,
+                        board_id=board["id"],
+                        read_seq=seq,
+                        updated_at=now_iso,
+                    )
             enqueue_outbox_for_message(
                 conn,
                 board_id=board["id"],

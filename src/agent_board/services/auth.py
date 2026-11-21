@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
+import hmac
+import ipaddress
 import json
 import secrets
 import sqlite3
@@ -185,6 +188,58 @@ def authenticate_session(
         max_role="owner",
         csrf_token=row["csrf_token"],
         ip=ip,
+    )
+
+
+def _ip_in_allowlist(
+    ip: str | None, allowlist: tuple[str, ...]
+) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+    if not ip or not allowlist:
+        return None
+    try:
+        addr = ipaddress.ip_address(ip.strip())
+    except ValueError:
+        return None
+    if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped is not None:
+        addr = addr.ipv4_mapped
+    for entry in allowlist:
+        try:
+            net = ipaddress.ip_network(entry.strip(), strict=False)
+        except ValueError:
+            continue
+        if addr.version == net.version and addr in net:
+            return addr
+    return None
+
+
+def authenticate_trusted_web_ip(services: AppServices, *, ip: str | None) -> AuthContext | None:
+    """Resolve an opt-in passwordless Web UI context when client IP is explicitly allowlisted."""
+    handle = services.settings.web_auto_login_handle
+    allowlist = services.settings.web_trusted_ips
+    if not handle or not allowlist:
+        return None
+    matched_addr = _ip_in_allowlist(ip, allowlist)
+    if matched_addr is None:
+        return None
+    row = principals_store.get_principal_by_handle(services.db.read_conn(), handle.strip().lower())
+    if row is None or row["kind"] != "human" or row["disabled_at"] is not None:
+        return None
+    csrf_token = hmac.new(
+        services.settings.secret_key.encode("utf-8"),
+        f"trusted-web-csrf:{row['id']}:{matched_addr}".encode(),
+        hashlib.sha256,
+    ).hexdigest()[:32]
+    return AuthContext(
+        principal_id=row["id"],
+        handle=row["handle"],
+        kind=row["kind"],
+        display_name=row["display_name"],
+        is_server_owner=bool(row["is_server_owner"]),
+        auth_kind="trusted_ip",
+        board_scope=("*",),
+        max_role="owner",
+        csrf_token=csrf_token,
+        ip=str(matched_addr),
     )
 
 

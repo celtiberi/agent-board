@@ -39,6 +39,8 @@ class Settings:
     nudge_poll_interval_s: float = 1.0
     nudge_timeout_s: float = 10.0
     redact_env_files: tuple[str, ...] = ()
+    web_auto_login_handle: str | None = None
+    web_trusted_ips: tuple[str, ...] = ()
 
     @property
     def db_path(self) -> Path:
@@ -118,6 +120,17 @@ def load_settings(data_dir: Path | None = None) -> Settings:
     else:
         redact_env_files = ()
 
+    auto_login_raw = _get("AGENT_BOARD_WEB_AUTO_LOGIN_HANDLE", "web_auto_login_handle", None)
+    web_auto_login_handle = str(auto_login_raw).strip().lower() or None if auto_login_raw else None
+
+    trusted_ips_raw = _get("AGENT_BOARD_WEB_TRUSTED_IPS", "web_trusted_ips", ())
+    if isinstance(trusted_ips_raw, str):
+        web_trusted_ips = tuple(ip.strip() for ip in trusted_ips_raw.split(",") if ip.strip())
+    elif isinstance(trusted_ips_raw, (list, tuple)):
+        web_trusted_ips = tuple(str(ip).strip() for ip in trusted_ips_raw if str(ip).strip())
+    else:
+        web_trusted_ips = ()
+
     return Settings(
         data_dir=resolved_data,
         bind=str(_get("AGENT_BOARD_BIND", "bind", "127.0.0.1:8790")),
@@ -143,4 +156,6 @@ def load_settings(data_dir: Path | None = None) -> Settings:
         rate_limit_writes_per_min=int(_get("AGENT_BOARD_RATE_LIMIT_WPM", "rate_limit_writes_per_min", 30)),
         nudge_poll_interval_s=float(_get("AGENT_BOARD_NUDGE_POLL_S", "nudge_poll_interval_s", 1.0)),
         redact_env_files=redact_env_files,
+        web_auto_login_handle=web_auto_login_handle,
+        web_trusted_ips=web_trusted_ips,
     )

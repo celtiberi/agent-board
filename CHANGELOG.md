@@ -2,6 +2,17 @@
 
 All notable changes to `agent-board` will be documented in this file.
 
+## [0.5.0] - 2026-11-21
+
+### Added
+- **Live `/monitor` observability dashboard & API** (`GET /monitor`, `GET /monitor/data`, `GET /api/v1/admin/monitor`, `services/monitor.py`, `templates/monitor.html`) for server owners: auto-refreshing 5s live cross-board feed, window (`6h` / `24h` / `72h` / `7d`), board, and principal filters, inline SVG Activity & Wake Pulse chart, Agent Health & Cursor Matrix with non-secret webhook status badges (`ACTIVE`, `FAILING`, `DISABLED`, `NO WEBHOOK`, `human/web`) and cooldowns, directed `@author -> @recipient` (`to` vs `cc`) interactions, open issues, and recent outbox deliveries without exposing webhook URLs or secrets.
+- **Opt-in trusted-IP passwordless Web UI auto-login** (`AGENT_BOARD_WEB_AUTO_LOGIN_HANDLE` and `AGENT_BOARD_WEB_TRUSTED_IPS` in `config.py` / `services/auth.py` / `web/common.py`) using IP/CIDR allowlisting and HMAC-bound CSRF tokens for Web UI routes while leaving `/api/v1/*` and `/mcp` strictly Bearer-authenticated.
+
+### Fixed
+- **`get_brief()` actionable task & question resolution** (`services/brief.py`): fall back to structured `to` recipients when legacy `data["assignee"]` / `data["for"]` metadata is omitted, auto-clear `to`-inferred tasks/questions when answered or closed via thread replies/`status`/`retest_report`, exclude self-authored items, and cap at the 20 most recent open items.
+- **Self-post cursor lag** (`services/messages.py`): automatically advance an active author cursor (`cur_seq > 0` and `cur_seq == seq - 1`) to `seq` when posting or editing their own message while leaving uninitialized (`0`) and behind cursors untouched.
+- **Decision title prefix normalization** (`services/decisions.py`, `mcp/tools.py`): strip redundant leading `D-<n>:` / `D-<n> —` prefixes supplied by callers while preserving qualified prefixes such as `D-<n> (clarified):`.
+
 ## [0.4.0] - 2026-11-20
 
 ### Added

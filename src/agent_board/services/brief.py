@@ -12,6 +12,7 @@ from agent_board.store import boards as boards_store
 from agent_board.store import decisions as decisions_store
 from agent_board.store import delivery as delivery_store
 from agent_board.store import issues as issues_store
+from agent_board.store import messages as messages_store
 
 _BRIEF_MAX_BYTES = 8192
 _MAX_FULL_DECISIONS = 40
@@ -69,30 +70,6 @@ def _find_open_tasks_and_questions(
         (board_id,),
     ).fetchall()
 
-    open_tasks: list[dict[str, Any]] = []
-    for row in task_rows:
-        data = json.loads(row["data"]) if row["data"] else {}
-        assignee = str(data.get("assignee", "")).strip().lower()
-        if assignee != caller_handle:
-            continue
-        eff_state = latest_state_by_target.get(row["id"], str(data.get("state", "open")).lower())
-        if eff_state in ("done", "cancelled", "closed", "resolved"):
-            continue
-        open_tasks.append(
-            {
-                "id": row["id"],
-                "seq": int(row["seq"]),
-                "thread_id": row["thread_id"],
-                "thread_title": row["thread_title"],
-                "author_handle": row["author_handle"],
-                "due": data.get("due"),
-                "state": eff_state,
-                "headline": _headline(row["body_md"]),
-                "created_at": row["created_at"],
-            }
-        )
-    open_tasks.reverse()
-
     question_rows = conn.execute(
         """
         SELECT m.id, m.seq, m.body_md, m.data, m.created_at, m.thread_id,
@@ -108,32 +85,123 @@ def _find_open_tasks_and_questions(
         (board_id,),
     ).fetchall()
 
+    to_by_msg = messages_store.get_mentions_for_messages(
+        conn, [r["id"] for r in task_rows] + [r["id"] for r in question_rows]
+    )
+
+    open_tasks: list[dict[str, Any]] = []
+    for row in task_rows:
+        data = json.loads(row["data"]) if row["data"] else {}
+        explicit_assignee = str(data.get("assignee", "")).strip().lower()
+        if explicit_assignee:
+            if explicit_assignee != caller_handle:
+                continue
+        else:
+            if (
+                caller_handle not in to_by_msg.get(row["id"], [])
+                or str(row["author_handle"]).lower() == caller_handle
+            ):
+                continue
+
+        eff_state = latest_state_by_target.get(row["id"], str(data.get("state", "open")).lower())
+        if eff_state in ("done", "cancelled", "closed", "resolved"):
+            continue
+
+        if not explicit_assignee:
+            completed = conn.execute(
+                """
+                SELECT 1
+                FROM messages r
+                WHERE r.board_id = ?
+                  AND r.thread_id = ?
+                  AND r.seq > ?
+                  AND r.author_id = ?
+                  AND r.redacted_at IS NULL
+                  AND (
+                      r.reply_to_id = ?
+                      OR (r.reply_to_id IS NULL AND r.type IN ('status', 'retest_report'))
+                  )
+                LIMIT 1
+                """,
+                (board_id, row["thread_id"], int(row["seq"]), caller_id, row["id"]),
+            ).fetchone()
+            if completed is not None:
+                continue
+
+        open_tasks.append(
+            {
+                "id": row["id"],
+                "seq": int(row["seq"]),
+                "thread_id": row["thread_id"],
+                "thread_title": row["thread_title"],
+                "author_handle": row["author_handle"],
+                "due": data.get("due"),
+                "state": eff_state,
+                "headline": _headline(row["body_md"]),
+                "created_at": row["created_at"],
+            }
+        )
+        if len(open_tasks) >= 20:
+            break
+    open_tasks.reverse()
+
     unanswered_questions: list[dict[str, Any]] = []
     for row in question_rows:
         data = json.loads(row["data"]) if row["data"] else {}
-        target_for = str(data.get("for", "")).strip().lower()
-        if target_for != caller_handle:
-            continue
+        explicit_for = str(data.get("for", "")).strip().lower()
+        if explicit_for:
+            if explicit_for != caller_handle:
+                continue
+        else:
+            if (
+                caller_handle not in to_by_msg.get(row["id"], [])
+                or str(row["author_handle"]).lower() == caller_handle
+            ):
+                continue
+
         status_override = latest_state_by_target.get(row["id"])
         if status_override in ("answered", "cancelled", "done"):
             continue
-        replied = conn.execute(
-            """
-            SELECT 1
-            FROM messages r
-            WHERE r.reply_to_id = ?
-              AND r.redacted_at IS NULL
-              AND (
-                  r.author_id = ?
-                  OR EXISTS (
-                      SELECT 1 FROM memberships mb
-                      WHERE mb.board_id = ? AND mb.principal_id = r.author_id AND mb.role = 'owner'
+
+        if not explicit_for:
+            replied = conn.execute(
+                """
+                SELECT 1
+                FROM messages r
+                WHERE r.board_id = ?
+                  AND r.thread_id = ?
+                  AND r.seq > ?
+                  AND r.redacted_at IS NULL
+                  AND (r.reply_to_id IS NULL OR r.reply_to_id = ?)
+                  AND (
+                      r.author_id = ?
+                      OR EXISTS (
+                          SELECT 1 FROM memberships mb
+                          WHERE mb.board_id = ? AND mb.principal_id = r.author_id AND mb.role = 'owner'
+                      )
                   )
-              )
-            LIMIT 1
-            """,
-            (row["id"], caller_id, board_id),
-        ).fetchone()
+                LIMIT 1
+                """,
+                (board_id, row["thread_id"], int(row["seq"]), row["id"], caller_id, board_id),
+            ).fetchone()
+        else:
+            replied = conn.execute(
+                """
+                SELECT 1
+                FROM messages r
+                WHERE r.reply_to_id = ?
+                  AND r.redacted_at IS NULL
+                  AND (
+                      r.author_id = ?
+                      OR EXISTS (
+                          SELECT 1 FROM memberships mb
+                          WHERE mb.board_id = ? AND mb.principal_id = r.author_id AND mb.role = 'owner'
+                      )
+                  )
+                LIMIT 1
+                """,
+                (row["id"], caller_id, board_id),
+            ).fetchone()
         if replied is not None:
             continue
         unanswered_questions.append(
@@ -147,6 +215,8 @@ def _find_open_tasks_and_questions(
                 "created_at": row["created_at"],
             }
         )
+        if len(unanswered_questions) >= 20:
+            break
     unanswered_questions.reverse()
     return open_tasks, unanswered_questions
 

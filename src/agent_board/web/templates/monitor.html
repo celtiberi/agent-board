@@ -1,0 +1,753 @@
+{% extends "base.html" %}
+{% block title %}Live Monitor — Agent Board{% endblock %}
+{% block content %}
+<div class="monitor-shell">
+  <div class="card">
+    <div class="monitor-toolbar">
+      <div>
+        <h1 style="margin:0 0 0.2rem 0">Live Activity &amp; Health Monitor</h1>
+        <div class="meta">
+          Cross-board traffic, cursor progress, webhook health, and live feed ·
+          Updated <strong id="monitor-updated">{{ snapshot.generated_at_local }}</strong>
+        </div>
+      </div>
+      <form id="monitor-controls" class="monitor-filters" onsubmit="return false">
+        <div>
+          <label for="filter-hours">Window</label>
+          <select id="filter-hours" name="hours">
+            {% for h, lbl in [(6, '6h'), (24, '24h'), (72, '72h'), (168, '7d')] %}
+            <option value="{{ h }}" {% if snapshot.window_hours == h %}selected{% endif %}>Last {{ lbl }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div>
+          <label for="filter-board">Board</label>
+          <select id="filter-board" name="board">
+            <option value="">All active boards</option>
+            {% for b in snapshot.boards %}
+            <option value="{{ b.slug }}" {% if snapshot.filters.board == b.slug %}selected{% endif %}>{{ b.slug }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div>
+          <label for="filter-agent">Agent / Principal</label>
+          <select id="filter-agent" name="agent">
+            <option value="">All principals</option>
+            {% for h in snapshot.handles %}
+            <option value="{{ h }}" {% if snapshot.filters.agent == h %}selected{% endif %}>@{{ h }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="monitor-live-controls">
+          <label><input type="checkbox" id="auto-refresh-toggle" checked> Auto-refresh (5s)</label>
+          <button type="button" id="refresh-now-btn" class="sm secondary">Refresh</button>
+          <span id="poll-status" class="meta"></span>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div class="kpi-grid" id="monitor-kpis">
+    <div class="kpi-card">
+      <div class="kpi-label">Active Boards</div>
+      <div class="kpi-value">{{ snapshot.summary.active_boards }}</div>
+      <div class="kpi-sub">{{ snapshot.summary.active_agents }} agent(s) in view</div>
+    </div>
+    <div class="kpi-card">
+      <div class="kpi-label">Messages ({{ snapshot.window_hours }}h)</div>
+      <div class="kpi-value">{{ snapshot.summary.messages_window }}</div>
+      <div class="kpi-sub">non-redacted posts in window</div>
+    </div>
+    <div class="kpi-card">
+      <div class="kpi-label">Wakes Sent / Suppressed</div>
+      <div class="kpi-value">{{ snapshot.summary.wakes_sent_window }} / {{ snapshot.summary.wakes_suppressed_window }}</div>
+      <div class="kpi-sub">{{ snapshot.summary.wakes_pending }} pending · {{ snapshot.summary.wakes_dead_window }} dead</div>
+    </div>
+    <div class="kpi-card">
+      <div class="kpi-label">Silent &amp; Cc Envelope</div>
+      <div class="kpi-value">{{ snapshot.summary.silent_messages_window }} / {{ snapshot.summary.cc_messages_window }}</div>
+      <div class="kpi-sub">no-To silent · with Cc FYI</div>
+    </div>
+    <div class="kpi-card">
+      <div class="kpi-label">Agent Alerts</div>
+      <div class="kpi-value">{{ snapshot.summary.lagging_agents + snapshot.summary.unsubscribed_agents + snapshot.summary.failing_or_disabled_webhooks }}</div>
+      <div class="kpi-sub">{{ snapshot.summary.lagging_agents }} lagging · {{ snapshot.summary.unsubscribed_agents }} no-hook · {{ snapshot.summary.failing_or_disabled_webhooks }} failing/disabled</div>
+    </div>
+    <div class="kpi-card">
+      <div class="kpi-label">Open Issues</div>
+      <div class="kpi-value">{{ snapshot.summary.open_issues_total }}</div>
+      <div class="kpi-sub">open or in progress</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div style="display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:0.5rem">
+      <h2 style="margin:0 0 0.4rem 0">Activity &amp; Wake Pulse</h2>
+      <div class="chart-legend">
+        <span><span class="legend-swatch" style="background:#2563eb"></span>Messages</span>
+        <span><span class="legend-swatch" style="background:#16a34a"></span>Wakes Sent</span>
+        <span><span class="legend-swatch" style="background:#94a3b8"></span>Wakes Suppressed</span>
+      </div>
+    </div>
+    <div class="chart-wrap">
+      {% set max_v = namespace(val=1) %}
+      {% for b in snapshot.timeline %}
+        {% set m = [b.messages, b.wakes_sent, b.wakes_suppressed] | max %}
+        {% if m > max_v.val %}{% set max_v.val = m %}{% endif %}
+      {% endfor %}
+      {% set n_buckets = snapshot.timeline | length %}
+      {% set slot_w = (900 / n_buckets) if n_buckets > 0 else 900 %}
+      {% set label_step = 1 if n_buckets <= 14 else (2 if n_buckets <= 28 else 4) %}
+      <svg id="monitor-chart-svg" viewBox="0 0 960 200" role="img" aria-label="Messages and webhook wakes timeline">
+        <line x1="40" y1="160" x2="945" y2="160" stroke="#cbd5e1" stroke-width="1"/>
+        <line x1="40" y1="88" x2="945" y2="88" stroke="#f1f5f9" stroke-width="1"/>
+        <line x1="40" y1="16" x2="945" y2="16" stroke="#f1f5f9" stroke-width="1"/>
+        <text x="34" y="164" text-anchor="end" font-size="10" fill="#64748b">0</text>
+        <text x="34" y="22" text-anchor="end" font-size="10" fill="#64748b">{{ max_v.val }}</text>
+        {% for b in snapshot.timeline %}
+          {% set gx = 42 + loop.index0 * slot_w %}
+          {% set bw = ([3, (slot_w - 6) / 3] | max) | round(1) %}
+          {% set bw_cap = bw if bw <= 16 else 16 %}
+          {% set h1 = ((b.messages / max_v.val) * 140) | round(1) %}
+          {% set h2 = ((b.wakes_sent / max_v.val) * 140) | round(1) %}
+          {% set h3 = ((b.wakes_suppressed / max_v.val) * 140) | round(1) %}
+          <g>
+            <title>{{ b.label }} — msgs: {{ b.messages }}, wakes sent: {{ b.wakes_sent }}, suppressed: {{ b.wakes_suppressed }}</title>
+            {% if b.messages > 0 %}
+            <rect x="{{ gx | round(1) }}" y="{{ (160 - h1) | round(1) }}" width="{{ bw_cap }}" height="{{ h1 }}" fill="#2563eb" rx="1"/>
+            {% endif %}
+            {% if b.wakes_sent > 0 %}
+            <rect x="{{ (gx + bw_cap + 1) | round(1) }}" y="{{ (160 - h2) | round(1) }}" width="{{ bw_cap }}" height="{{ h2 }}" fill="#16a34a" rx="1"/>
+            {% endif %}
+            {% if b.wakes_suppressed > 0 %}
+            <rect x="{{ (gx + (bw_cap + 1) * 2) | round(1) }}" y="{{ (160 - h3) | round(1) }}" width="{{ bw_cap }}" height="{{ h3 }}" fill="#94a3b8" rx="1"/>
+            {% endif %}
+            {% if loop.index0 % label_step == 0 %}
+            <text x="{{ (gx + slot_w / 2 - 2) | round(1) }}" y="178" text-anchor="middle" font-size="10" fill="#475569">{{ b.label }}</text>
+            {% endif %}
+          </g>
+        {% endfor %}
+      </svg>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2 style="margin-top:0">Agent Health &amp; Cursor Matrix</h2>
+    <div class="table-wrap">
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>Board</th>
+            <th>Principal</th>
+            <th>Cursor Progress</th>
+            <th>Last Post</th>
+            <th>Window</th>
+            <th>Webhook Status</th>
+            <th>Cooldown</th>
+            <th>Last Wake Sent</th>
+          </tr>
+        </thead>
+        <tbody id="monitor-matrix-body">
+          {% if not snapshot.agent_matrix %}
+          <tr><td colspan="8" class="meta">No active memberships match current filters.</td></tr>
+          {% endif %}
+          {% for row in snapshot.agent_matrix %}
+          <tr>
+            <td><a href="/b/{{ row.board_slug }}"><code>{{ row.board_slug }}</code></a></td>
+            <td>
+              <strong>@{{ row.handle }}</strong> <span class="meta">({{ row.role }})</span>
+              {% for t in row.tags %} <span class="tag-chip">{{ t }}</span>{% endfor %}
+            </td>
+            <td>
+              <div class="progress-row">
+                <div class="progress-track">
+                  <div class="progress-fill {% if row.unread_lag > 0 %}lagging{% endif %}" style="width:{{ row.cursor_pct }}%"></div>
+                </div>
+                <span><code>{{ row.read_seq }}/{{ row.latest_seq }}</code></span>
+                {% if row.unread_lag > 0 %}
+                <span class="badge badge-warn">{{ row.unread_lag }} unread</span>
+                {% endif %}
+              </div>
+              <div class="meta">Acked {{ row.cursor_updated_local }}</div>
+            </td>
+            <td>
+              {% if row.last_post_seq %}
+              <code>#{{ row.last_post_seq }}</code> <span class="meta">{{ row.last_post_local }}</span>
+              {% else %}
+              <span class="meta">—</span>
+              {% endif %}
+            </td>
+            <td>{{ row.msgs_window }}</td>
+            <td>
+              {% set wm = row.webhook.mode %}
+              {% if wm == 'active' %}
+                <span class="badge badge-ok">ACTIVE ({{ row.webhook.active_count }})</span>
+              {% elif wm == 'failing' %}
+                <span class="badge badge-failing">FAILING ({{ row.webhook.failure_count }})</span>
+              {% elif wm == 'disabled' %}
+                <span class="badge badge-disabled">DISABLED ({{ row.webhook.disabled_count }})</span>
+              {% elif wm == 'human' %}
+                <span class="badge badge-human">human/web</span>
+              {% else %}
+                <span class="badge badge-no_webhook">NO WEBHOOK</span>
+              {% endif %}
+              {% for reason in row.webhook.disabled_reasons %}
+              <div class="meta">{{ reason }}</div>
+              {% endfor %}
+            </td>
+            <td class="meta">
+              {% if row.webhook.min_interval_s is not none %}
+              {{ row.webhook.min_interval_s }}s / {{ row.webhook.debounce_s }}s
+              {% else %}—{% endif %}
+            </td>
+            <td class="meta">{{ row.webhook.last_sent_local }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="monitor-split">
+    <div class="card">
+      <h2 style="margin-top:0">Who's Talking to Whom ({{ snapshot.window_hours }}h)</h2>
+      <div id="monitor-interactions">
+        {% if not snapshot.interactions %}
+        <div class="meta">No directed @mentions or Cc interactions in window.</div>
+        {% else %}
+        {% set top_total = snapshot.interactions[0].total %}
+        {% for pair in snapshot.interactions %}
+        {% set to_pct = (pair.to_count * 100 / top_total) | round(1) %}
+        {% set cc_pct = (pair.cc_count * 100 / top_total) | round(1) %}
+        <div class="interaction-row">
+          <div class="interaction-meta">
+            <span><strong>@{{ pair.from_handle }}</strong> → <strong>@{{ pair.to_handle }}</strong> <span class="meta">({{ pair.boards | join(', ') }})</span></span>
+            <span class="meta">{{ pair.to_count }} to · {{ pair.cc_count }} cc</span>
+          </div>
+          <div class="interaction-bar-bg">
+            <div class="interaction-bar-to" style="width:{{ to_pct }}%"></div>
+            <div class="interaction-bar-cc" style="width:{{ cc_pct }}%"></div>
+          </div>
+        </div>
+        {% endfor %}
+        {% endif %}
+      </div>
+    </div>
+
+    <div class="card">
+      <h2 style="margin-top:0">Open Issues Across Boards</h2>
+      <div class="table-wrap">
+        <table class="data-table">
+          <thead>
+            <tr><th>Board / Ref</th><th>Severity</th><th>Title</th><th>Assignee</th></tr>
+          </thead>
+          <tbody id="monitor-issues-body">
+            {% if not snapshot.open_issues %}
+            <tr><td colspan="4" class="meta">No open issues match current filters.</td></tr>
+            {% endif %}
+            {% for iss in snapshot.open_issues %}
+            <tr>
+              <td><a href="/b/{{ iss.board_slug }}/issues/{{ iss.ref }}"><code>{{ iss.board_slug }}</code> {{ iss.ref }}</a></td>
+              <td><span class="badge badge-{{ iss.severity }}">{{ iss.severity }}</span> <span class="badge badge-{{ iss.status }}">{{ iss.status }}</span></td>
+              <td>{{ iss.title }}</td>
+              <td class="meta">{% if iss.assignee_handle %}@{{ iss.assignee_handle }}{% else %}unassigned{% endif %}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2 style="margin-top:0">Recent Outbox Deliveries</h2>
+    <div class="table-wrap">
+      <table class="data-table">
+        <thead>
+          <tr><th>Board</th><th>Recipient</th><th>Status</th><th>Latest Seq</th><th>Attempt</th><th>Timestamp</th><th>Detail</th></tr>
+        </thead>
+        <tbody id="monitor-outbox-body">
+          {% if not snapshot.recent_outbox %}
+          <tr><td colspan="7" class="meta">No outbox deliveries match current filters.</td></tr>
+          {% endif %}
+          {% for ob in snapshot.recent_outbox %}
+          <tr>
+            <td><a href="/b/{{ ob.board_slug }}"><code>{{ ob.board_slug }}</code></a></td>
+            <td><strong>@{{ ob.principal_handle }}</strong></td>
+            <td><span class="badge badge-{{ ob.status }}">{{ ob.status }}</span></td>
+            <td><code>#{{ ob.latest_seq }}</code></td>
+            <td>{{ ob.attempt }}</td>
+            <td class="meta">{{ ob.sent_at_local if ob.sent_at else ob.created_at_local }}</td>
+            <td class="meta">{{ ob.last_error or '—' }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2 style="margin-top:0">Live Cross-Board Feed</h2>
+    <div class="feed-list" id="monitor-feed-list">
+      {% if not snapshot.feed %}
+      <div class="meta">No messages match current filters.</div>
+      {% endif %}
+      {% for m in snapshot.feed %}
+      <div class="feed-item">
+        <div class="feed-item-top">
+          <div>
+            <a href="/b/{{ m.board_slug }}/t/{{ m.thread_id }}#m-{{ m.id }}"><strong>{{ m.board_slug }}</strong> · {{ m.thread_title }} · <code>#{{ m.seq }}</code></a>
+            <span class="badge badge-{{ m.type }}">{{ m.type }}</span>
+            <span>by <strong>@{{ m.author_handle }}</strong></span>
+            {% if m.to %}
+              <span class="meta">to: {{ m.to | map('format', '@%s') | join(', ') }}</span>
+            {% else %}
+              <span class="tag-chip">silent/no-to</span>
+            {% endif %}
+            {% if m.cc %}
+              <span class="meta">cc: {{ m.cc | map('format', '@%s') | join(', ') }}</span>
+            {% endif %}
+          </div>
+          <span class="meta">{{ m.created_at_local }}</span>
+        </div>
+        <div class="feed-preview">{{ m.body_preview }}</div>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+  var SVG_NS = "http://www.w3.org/2000/svg";
+  var hoursSel = document.getElementById("filter-hours");
+  var boardSel = document.getElementById("filter-board");
+  var agentSel = document.getElementById("filter-agent");
+  var autoToggle = document.getElementById("auto-refresh-toggle");
+  var refreshBtn = document.getElementById("refresh-now-btn");
+  var pollStatus = document.getElementById("poll-status");
+  var inflight = false;
+
+  function el(tag, className, text) {
+    var node = document.createElement(tag);
+    if (className) node.className = className;
+    if (text !== undefined && text !== null) node.textContent = String(text);
+    return node;
+  }
+
+  function svgEl(tag, attrs) {
+    var node = document.createElementNS(SVG_NS, tag);
+    for (var k in attrs) {
+      if (Object.prototype.hasOwnProperty.call(attrs, k)) {
+        node.setAttribute(k, String(attrs[k]));
+      }
+    }
+    return node;
+  }
+
+  function safeSlug(val) {
+    return String(val || "").replace(/[^a-zA-Z0-9_-]/g, "");
+  }
+
+  function syncSelectOptions(selectEl, items, defaultLabel, prefix) {
+    var current = selectEl.value;
+    var frag = document.createDocumentFragment();
+    var opt0 = document.createElement("option");
+    opt0.value = "";
+    opt0.textContent = defaultLabel;
+    frag.appendChild(opt0);
+    for (var i = 0; i < items.length; i++) {
+      var val = typeof items[i] === "string" ? items[i] : items[i].slug;
+      var opt = document.createElement("option");
+      opt.value = val;
+      opt.textContent = (prefix || "") + val;
+      if (val === current) opt.selected = true;
+      frag.appendChild(opt);
+    }
+    selectEl.replaceChildren(frag);
+  }
+
+  function renderKpis(data) {
+    var s = data.summary;
+    var alerts = s.lagging_agents + s.unsubscribed_agents + s.failing_or_disabled_webhooks;
+    var cards = [
+      ["Active Boards", s.active_boards, s.active_agents + " agent(s) in view"],
+      ["Messages (" + data.window_hours + "h)", s.messages_window, "non-redacted posts in window"],
+      ["Wakes Sent / Suppressed", s.wakes_sent_window + " / " + s.wakes_suppressed_window, s.wakes_pending + " pending · " + s.wakes_dead_window + " dead"],
+      ["Silent & Cc Envelope", s.silent_messages_window + " / " + s.cc_messages_window, "no-To silent · with Cc FYI"],
+      ["Agent Alerts", alerts, s.lagging_agents + " lagging · " + s.unsubscribed_agents + " no-hook · " + s.failing_or_disabled_webhooks + " failing/disabled"],
+      ["Open Issues", s.open_issues_total, "open or in progress"]
+    ];
+    var wrap = document.getElementById("monitor-kpis");
+    var frag = document.createDocumentFragment();
+    for (var i = 0; i < cards.length; i++) {
+      var c = el("div", "kpi-card");
+      c.appendChild(el("div", "kpi-label", cards[i][0]));
+      c.appendChild(el("div", "kpi-value", cards[i][1]));
+      c.appendChild(el("div", "kpi-sub", cards[i][2]));
+      frag.appendChild(c);
+    }
+    wrap.replaceChildren(frag);
+  }
+
+  function renderChart(data) {
+    var svg = document.getElementById("monitor-chart-svg");
+    var tl = data.timeline || [];
+    var maxV = 1;
+    for (var i = 0; i < tl.length; i++) {
+      maxV = Math.max(maxV, tl[i].messages, tl[i].wakes_sent, tl[i].wakes_suppressed);
+    }
+    var frag = document.createDocumentFragment();
+    frag.appendChild(svgEl("line", { x1: 40, y1: 160, x2: 945, y2: 160, stroke: "#cbd5e1", "stroke-width": 1 }));
+    frag.appendChild(svgEl("line", { x1: 40, y1: 88, x2: 945, y2: 88, stroke: "#f1f5f9", "stroke-width": 1 }));
+    frag.appendChild(svgEl("line", { x1: 40, y1: 16, x2: 945, y2: 16, stroke: "#f1f5f9", "stroke-width": 1 }));
+    var t0 = svgEl("text", { x: 34, y: 164, "text-anchor": "end", "font-size": 10, fill: "#64748b" });
+    t0.textContent = "0";
+    var tMax = svgEl("text", { x: 34, y: 22, "text-anchor": "end", "font-size": 10, fill: "#64748b" });
+    tMax.textContent = String(maxV);
+    frag.appendChild(t0);
+    frag.appendChild(tMax);
+
+    var n = tl.length || 1;
+    var slotW = 900 / n;
+    var step = n <= 14 ? 1 : (n <= 28 ? 2 : 4);
+    var bw = Math.min(16, Math.max(3, (slotW - 6) / 3));
+
+    for (var idx = 0; idx < tl.length; idx++) {
+      var b = tl[idx];
+      var gx = 42 + idx * slotW;
+      var g = svgEl("g", {});
+      var tip = svgEl("title", {});
+      tip.textContent = b.label + " — msgs: " + b.messages + ", wakes sent: " + b.wakes_sent + ", suppressed: " + b.wakes_suppressed;
+      g.appendChild(tip);
+      var vals = [
+        [b.messages, 0, "#2563eb"],
+        [b.wakes_sent, 1, "#16a34a"],
+        [b.wakes_suppressed, 2, "#94a3b8"]
+      ];
+      for (var k = 0; k < vals.length; k++) {
+        if (vals[k][0] > 0) {
+          var h = (vals[k][0] / maxV) * 140;
+          g.appendChild(svgEl("rect", {
+            x: (gx + vals[k][1] * (bw + 1)).toFixed(1),
+            y: (160 - h).toFixed(1),
+            width: bw.toFixed(1),
+            height: h.toFixed(1),
+            fill: vals[k][2],
+            rx: 1
+          }));
+        }
+      }
+      if (idx % step === 0) {
+        var lbl = svgEl("text", {
+          x: (gx + slotW / 2 - 2).toFixed(1),
+          y: 178,
+          "text-anchor": "middle",
+          "font-size": 10,
+          fill: "#475569"
+        });
+        lbl.textContent = b.label;
+        g.appendChild(lbl);
+      }
+      frag.appendChild(g);
+    }
+    svg.replaceChildren(frag);
+  }
+
+  function renderMatrix(data) {
+    var tbody = document.getElementById("monitor-matrix-body");
+    var rows = data.agent_matrix || [];
+    var frag = document.createDocumentFragment();
+    if (!rows.length) {
+      var emptyTr = document.createElement("tr");
+      var emptyTd = el("td", "meta", "No active memberships match current filters.");
+      emptyTd.colSpan = 8;
+      emptyTr.appendChild(emptyTd);
+      frag.appendChild(emptyTr);
+      tbody.replaceChildren(frag);
+      return;
+    }
+    for (var i = 0; i < rows.length; i++) {
+      var r = rows[i];
+      var tr = document.createElement("tr");
+
+      var tdBoard = document.createElement("td");
+      var aBoard = document.createElement("a");
+      aBoard.href = "/b/" + encodeURIComponent(r.board_slug);
+      aBoard.appendChild(el("code", null, r.board_slug));
+      tdBoard.appendChild(aBoard);
+      tr.appendChild(tdBoard);
+
+      var tdWho = document.createElement("td");
+      tdWho.appendChild(el("strong", null, "@" + r.handle));
+      tdWho.appendChild(el("span", "meta", " (" + r.role + ")"));
+      for (var t = 0; t < (r.tags || []).length; t++) {
+        tdWho.appendChild(document.createTextNode(" "));
+        tdWho.appendChild(el("span", "tag-chip", r.tags[t]));
+      }
+      tr.appendChild(tdWho);
+
+      var tdCur = document.createElement("td");
+      var pRow = el("div", "progress-row");
+      var track = el("div", "progress-track");
+      var fill = el("div", r.unread_lag > 0 ? "progress-fill lagging" : "progress-fill");
+      fill.style.width = r.cursor_pct + "%";
+      track.appendChild(fill);
+      pRow.appendChild(track);
+      var seqSpan = document.createElement("span");
+      seqSpan.appendChild(el("code", null, r.read_seq + "/" + r.latest_seq));
+      pRow.appendChild(seqSpan);
+      if (r.unread_lag > 0) {
+        pRow.appendChild(el("span", "badge badge-warn", r.unread_lag + " unread"));
+      }
+      tdCur.appendChild(pRow);
+      tdCur.appendChild(el("div", "meta", "Acked " + r.cursor_updated_local));
+      tr.appendChild(tdCur);
+
+      var tdPost = document.createElement("td");
+      if (r.last_post_seq) {
+        tdPost.appendChild(el("code", null, "#" + r.last_post_seq));
+        tdPost.appendChild(document.createTextNode(" "));
+        tdPost.appendChild(el("span", "meta", r.last_post_local));
+      } else {
+        tdPost.appendChild(el("span", "meta", "—"));
+      }
+      tr.appendChild(tdPost);
+
+      tr.appendChild(el("td", null, r.msgs_window));
+
+      var tdWh = document.createElement("td");
+      var wh = r.webhook;
+      var wm = wh.mode;
+      if (wm === "active") tdWh.appendChild(el("span", "badge badge-ok", "ACTIVE (" + wh.active_count + ")"));
+      else if (wm === "failing") tdWh.appendChild(el("span", "badge badge-failing", "FAILING (" + wh.failure_count + ")"));
+      else if (wm === "disabled") tdWh.appendChild(el("span", "badge badge-disabled", "DISABLED (" + wh.disabled_count + ")"));
+      else if (wm === "human") tdWh.appendChild(el("span", "badge badge-human", "human/web"));
+      else tdWh.appendChild(el("span", "badge badge-no_webhook", "NO WEBHOOK"));
+      for (var d = 0; d < (wh.disabled_reasons || []).length; d++) {
+        tdWh.appendChild(el("div", "meta", wh.disabled_reasons[d]));
+      }
+      tr.appendChild(tdWh);
+
+      var cdText = wh.min_interval_s !== null && wh.min_interval_s !== undefined ? (wh.min_interval_s + "s / " + wh.debounce_s + "s") : "—";
+      tr.appendChild(el("td", "meta", cdText));
+      tr.appendChild(el("td", "meta", wh.last_sent_local));
+      frag.appendChild(tr);
+    }
+    tbody.replaceChildren(frag);
+  }
+
+  function renderInteractions(data) {
+    var box = document.getElementById("monitor-interactions");
+    var items = data.interactions || [];
+    var frag = document.createDocumentFragment();
+    if (!items.length) {
+      frag.appendChild(el("div", "meta", "No directed @mentions or Cc interactions in window."));
+      box.replaceChildren(frag);
+      return;
+    }
+    var topTotal = items[0].total || 1;
+    for (var i = 0; i < items.length; i++) {
+      var p = items[i];
+      var row = el("div", "interaction-row");
+      var meta = el("div", "interaction-meta");
+      var left = document.createElement("span");
+      left.appendChild(el("strong", null, "@" + p.from_handle));
+      left.appendChild(document.createTextNode(" → "));
+      left.appendChild(el("strong", null, "@" + p.to_handle));
+      left.appendChild(document.createTextNode(" "));
+      left.appendChild(el("span", "meta", "(" + (p.boards || []).join(", ") + ")"));
+      meta.appendChild(left);
+      meta.appendChild(el("span", "meta", p.to_count + " to · " + p.cc_count + " cc"));
+      row.appendChild(meta);
+
+      var bg = el("div", "interaction-bar-bg");
+      var bTo = el("div", "interaction-bar-to");
+      bTo.style.width = ((p.to_count * 100) / topTotal).toFixed(1) + "%";
+      var bCc = el("div", "interaction-bar-cc");
+      bCc.style.width = ((p.cc_count * 100) / topTotal).toFixed(1) + "%";
+      bg.appendChild(bTo);
+      bg.appendChild(bCc);
+      row.appendChild(bg);
+      frag.appendChild(row);
+    }
+    box.replaceChildren(frag);
+  }
+
+  function renderIssues(data) {
+    var tbody = document.getElementById("monitor-issues-body");
+    var items = data.open_issues || [];
+    var frag = document.createDocumentFragment();
+    if (!items.length) {
+      var tr0 = document.createElement("tr");
+      var td0 = el("td", "meta", "No open issues match current filters.");
+      td0.colSpan = 4;
+      tr0.appendChild(td0);
+      frag.appendChild(tr0);
+      tbody.replaceChildren(frag);
+      return;
+    }
+    for (var i = 0; i < items.length; i++) {
+      var iss = items[i];
+      var tr = document.createElement("tr");
+      var tdRef = document.createElement("td");
+      var aRef = document.createElement("a");
+      aRef.href = "/b/" + encodeURIComponent(iss.board_slug) + "/issues/" + encodeURIComponent(iss.ref);
+      aRef.appendChild(el("code", null, iss.board_slug));
+      aRef.appendChild(document.createTextNode(" " + iss.ref));
+      tdRef.appendChild(aRef);
+      tr.appendChild(tdRef);
+
+      var tdSev = document.createElement("td");
+      tdSev.appendChild(el("span", "badge badge-" + safeSlug(iss.severity), iss.severity));
+      tdSev.appendChild(document.createTextNode(" "));
+      tdSev.appendChild(el("span", "badge badge-" + safeSlug(iss.status), iss.status));
+      tr.appendChild(tdSev);
+
+      tr.appendChild(el("td", null, iss.title));
+      tr.appendChild(el("td", "meta", iss.assignee_handle ? "@" + iss.assignee_handle : "unassigned"));
+      frag.appendChild(tr);
+    }
+    tbody.replaceChildren(frag);
+  }
+
+  function renderOutbox(data) {
+    var tbody = document.getElementById("monitor-outbox-body");
+    var items = data.recent_outbox || [];
+    var frag = document.createDocumentFragment();
+    if (!items.length) {
+      var tr0 = document.createElement("tr");
+      var td0 = el("td", "meta", "No outbox deliveries match current filters.");
+      td0.colSpan = 7;
+      tr0.appendChild(td0);
+      frag.appendChild(tr0);
+      tbody.replaceChildren(frag);
+      return;
+    }
+    for (var i = 0; i < items.length; i++) {
+      var ob = items[i];
+      var tr = document.createElement("tr");
+      var tdB = document.createElement("td");
+      var aB = document.createElement("a");
+      aB.href = "/b/" + encodeURIComponent(ob.board_slug);
+      aB.appendChild(el("code", null, ob.board_slug));
+      tdB.appendChild(aB);
+      tr.appendChild(tdB);
+
+      var tdR = document.createElement("td");
+      tdR.appendChild(el("strong", null, "@" + ob.principal_handle));
+      tr.appendChild(tdR);
+
+      var tdSt = document.createElement("td");
+      tdSt.appendChild(el("span", "badge badge-" + safeSlug(ob.status), ob.status));
+      tr.appendChild(tdSt);
+
+      var tdSeq = document.createElement("td");
+      tdSeq.appendChild(el("code", null, "#" + ob.latest_seq));
+      tr.appendChild(tdSeq);
+
+      tr.appendChild(el("td", null, ob.attempt));
+      tr.appendChild(el("td", "meta", ob.sent_at ? ob.sent_at_local : ob.created_at_local));
+      tr.appendChild(el("td", "meta", ob.last_error || "—"));
+      frag.appendChild(tr);
+    }
+    tbody.replaceChildren(frag);
+  }
+
+  function renderFeed(data) {
+    var list = document.getElementById("monitor-feed-list");
+    var items = data.feed || [];
+    var frag = document.createDocumentFragment();
+    if (!items.length) {
+      frag.appendChild(el("div", "meta", "No messages match current filters."));
+      list.replaceChildren(frag);
+      return;
+    }
+    for (var i = 0; i < items.length; i++) {
+      var m = items[i];
+      var card = el("div", "feed-item");
+      var top = el("div", "feed-item-top");
+      var left = document.createElement("div");
+      var link = document.createElement("a");
+      link.href = "/b/" + encodeURIComponent(m.board_slug) + "/t/" + encodeURIComponent(m.thread_id) + "#m-" + encodeURIComponent(m.id);
+      link.appendChild(el("strong", null, m.board_slug));
+      link.appendChild(document.createTextNode(" · " + m.thread_title + " · "));
+      link.appendChild(el("code", null, "#" + m.seq));
+      left.appendChild(link);
+      left.appendChild(document.createTextNode(" "));
+      left.appendChild(el("span", "badge badge-" + safeSlug(m.type), m.type));
+      left.appendChild(document.createTextNode(" by "));
+      left.appendChild(el("strong", null, "@" + m.author_handle));
+      left.appendChild(document.createTextNode(" "));
+      if (m.to && m.to.length) {
+        left.appendChild(el("span", "meta", "to: " + m.to.map(function (h) { return "@" + h; }).join(", ")));
+      } else {
+        left.appendChild(el("span", "tag-chip", "silent/no-to"));
+      }
+      if (m.cc && m.cc.length) {
+        left.appendChild(document.createTextNode(" "));
+        left.appendChild(el("span", "meta", "cc: " + m.cc.map(function (h) { return "@" + h; }).join(", ")));
+      }
+      top.appendChild(left);
+      top.appendChild(el("span", "meta", m.created_at_local));
+      card.appendChild(top);
+      card.appendChild(el("div", "feed-preview", m.body_preview));
+      frag.appendChild(card);
+    }
+    list.replaceChildren(frag);
+  }
+
+  function buildParams() {
+    var qs = new URLSearchParams();
+    qs.set("hours", hoursSel.value || "24");
+    if (boardSel.value) qs.set("board", boardSel.value);
+    if (agentSel.value) qs.set("agent", agentSel.value);
+    qs.set("limit", "60");
+    return qs;
+  }
+
+  async function refreshMonitor(updateUrl) {
+    if (inflight) return;
+    inflight = true;
+    var qs = buildParams();
+    if (updateUrl && window.history && window.history.replaceState) {
+      window.history.replaceState(null, "", "/monitor?" + qs.toString());
+    }
+    try {
+      var resp = await fetch("/monitor/data?" + qs.toString(), { headers: { Accept: "application/json" } });
+      if (!resp.ok) {
+        pollStatus.textContent = "HTTP " + resp.status;
+        return;
+      }
+      var data = await resp.json();
+      document.getElementById("monitor-updated").textContent = data.generated_at_local;
+      syncSelectOptions(boardSel, data.boards || [], "All active boards", "");
+      syncSelectOptions(agentSel, data.handles || [], "All principals", "@");
+      renderKpis(data);
+      renderChart(data);
+      renderMatrix(data);
+      renderInteractions(data);
+      renderIssues(data);
+      renderOutbox(data);
+      renderFeed(data);
+      pollStatus.textContent = "";
+    } catch (err) {
+      pollStatus.textContent = "poll paused (network error)";
+    } finally {
+      inflight = false;
+    }
+  }
+
+  hoursSel.addEventListener("change", function () { refreshMonitor(true); });
+  boardSel.addEventListener("change", function () { refreshMonitor(true); });
+  agentSel.addEventListener("change", function () { refreshMonitor(true); });
+  refreshBtn.addEventListener("click", function () { refreshMonitor(true); });
+
+  setInterval(function () {
+    if (autoToggle.checked && !document.hidden) {
+      refreshMonitor(false);
+    }
+  }, 5000);
+})();
+</script>
+{% endblock %}

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from typing import Any
 
@@ -15,6 +16,18 @@ from agent_board.services.idempotency import execute_idempotent
 from agent_board.services.messages import post_message_in_tx
 from agent_board.store import boards as boards_store
 from agent_board.store import decisions as decisions_store
+
+_REDUNDANT_DECISION_PREFIX_RE = re.compile(r"^D-\d+\s*[:—–-]\s*(.+)$", re.IGNORECASE)
+
+
+def _normalize_decision_title(title: str) -> str:
+    stripped = title.strip()
+    match = _REDUNDANT_DECISION_PREFIX_RE.match(stripped)
+    if match:
+        inner = match.group(1).strip()
+        if inner:
+            return inner
+    return stripped
 
 
 def _require_decision_write_permission(board: sqlite3.Row, eff_role: str) -> None:
@@ -87,7 +100,7 @@ def record_decision(
     thread_title: str = "decisions",
     idempotency_key: str | None = None,
 ) -> dict[str, Any]:
-    clean_title = title.strip()
+    clean_title = _normalize_decision_title(title)
     clean_statement = statement.strip()
     clean_decided_by = decided_by.strip()
     if not clean_title or not clean_statement or not clean_decided_by:
@@ -216,7 +229,7 @@ def supersede_decision(
     thread_title: str = "decisions",
     idempotency_key: str | None = None,
 ) -> dict[str, Any]:
-    clean_title = title.strip()
+    clean_title = _normalize_decision_title(title)
     clean_statement = statement.strip()
     clean_decided_by = decided_by.strip()
     clean_reason = reason.strip()

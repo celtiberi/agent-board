@@ -14,6 +14,7 @@
     "author_handle": { "type": "string" },
     "type": { "type": "string", "enum": ["note", "task", "question", "decision", "issue", "status", "retest_report", "summary", "system"] },
     "priority": { "type": "string", "enum": ["normal", "urgent"] },
+    "silent": { "type": "boolean" },
     "body_md": { "type": "string" },
     "data": { "type": ["object", "null"] },
     "warnings": { "type": "array", "items": { "type": "string" } },

@@ -17,6 +17,8 @@ from agent_board.services import brief as brief_svc
 from agent_board.services import delivery as delivery_svc
 from agent_board.services import issues as issues_svc
 from agent_board.services import messages as messages_svc
+from agent_board.services import shout as shout_svc
+from agent_board.store import delivery as delivery_store
 
 
 def test_dnd_defers_non_urgent_and_urgent_plus_blocker_bypass(env) -> None:
@@ -185,3 +187,64 @@ def test_worker_defers_pending_row_if_dnd_enabled_after_enqueue(env) -> None:
     ).fetchone()
     assert pending is not None
     assert pending["next_attempt_at"] == future_until
+
+
+def test_silent_flag_persists_and_skips_nudge_unread_details(env) -> None:
+    # 1. Explicit to=[] sets silent=True and does not generate wakes even for actionable types
+    m_silent = messages_svc.post_message(
+        env.services,
+        env.dev_ctx,
+        board_slug="alpha",
+        msg_type="status",
+        body_md="Quiet closure",
+        to=[],
+    )
+    assert m_silent["silent"] is True
+
+    # 2. Untargeted post (to=None) keeps silent=False
+    m_open = messages_svc.post_message(
+        env.services,
+        env.dev_ctx,
+        board_slug="alpha",
+        msg_type="task",
+        body_md="Open task for subscribers",
+        to=None,
+    )
+    assert m_open["silent"] is False
+
+    # 3. Silent post with wake=False via shout persists silent=True
+    shout_res = shout_svc.shout(
+        env.services,
+        env.owner_ctx,
+        body_md="Quiet shout",
+        all_boards=True,
+        wake=False,
+    )
+    assert shout_res["deliveries"]
+
+    # 4. get_nudge_unread_details ignores silent messages (even when mentions_only=False)
+    conn = env.services.db.read_conn()
+    board = conn.execute("SELECT id FROM boards WHERE slug = 'alpha'").fetchone()
+    assert board is not None
+    bob = conn.execute("SELECT id FROM principals WHERE handle = 'bob'").fetchone()
+    assert bob is not None
+
+    # Starting cursor at m_silent["seq"] - 1 sees only m_open (not m_silent or quiet shout)
+    details = delivery_store.get_nudge_unread_details(
+        conn,
+        board_id=board["id"],
+        principal_id=bob["id"],
+        read_seq=m_silent["seq"] - 1,
+        filter_cfg={"mentions_only": False, "types": ["status", "task", "note"]},
+    )
+    assert details["trigger_seqs"] == [m_open["seq"]]
+
+    # If everything unread is silent, trigger_seqs is empty (unmentioned silent closures do not trigger)
+    details_only_silent = delivery_store.get_nudge_unread_details(
+        conn,
+        board_id=board["id"],
+        principal_id=bob["id"],
+        read_seq=m_open["seq"],
+        filter_cfg={"mentions_only": False, "types": ["status", "task", "note"]},
+    )
+    assert details_only_silent["trigger_seqs"] == []

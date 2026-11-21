@@ -22,7 +22,7 @@ _PARTIAL_MIN_UNCACHED = 20_000
 class TelemetryThresholds:
     """Deterministic thresholds controlling monitor badges and alert notifications."""
 
-    context_warn_tokens: int = 180_000
+    context_warn_tokens: int = 150_000
     context_critical_tokens: int = 280_000
     agent_uncached_5h: int = 2_500_000
     global_uncached_5h: int = 8_000_000
@@ -75,6 +75,9 @@ def _empty_bucket() -> dict[str, Any]:
         },
         "partial_collapses_5h": 0,
         "partial_collapse_uncached_5h": 0,
+        "idle_wake_total_5h": 0,
+        "idle_wake_partial_5h": 0,
+        "idle_wake_zero_5h": 0,
         "steps_5h": 0,
     }
 
@@ -90,6 +93,9 @@ def _add_window_stats(dest: dict[str, Any], src: dict[str, Any]) -> None:
         "user_uncached_5h",
         "partial_collapses_5h",
         "partial_collapse_uncached_5h",
+        "idle_wake_total_5h",
+        "idle_wake_partial_5h",
+        "idle_wake_zero_5h",
         "steps_5h",
     ):
         dest[key] += int(src[key])
@@ -100,7 +106,10 @@ def _add_window_stats(dest: dict[str, Any], src: dict[str, Any]) -> None:
 def _finalize_bucket(bucket: dict[str, Any]) -> dict[str, Any]:
     denom = bucket["uncached_5h"] + bucket["cache_read_5h"]
     hit_rate = round((bucket["cache_read_5h"] * 100.0) / denom, 1) if denom > 0 else None
-    return {**bucket, "hit_rate_5h": hit_rate}
+    idle_total = int(bucket["idle_wake_total_5h"])
+    idle_misses = int(bucket["idle_wake_partial_5h"]) + int(bucket["idle_wake_zero_5h"])
+    idle_miss_rate = round((idle_misses * 100.0) / idle_total, 1) if idle_total > 0 else None
+    return {**bucket, "hit_rate_5h": hit_rate, "idle_wake_miss_rate_5h": idle_miss_rate}
 
 
 def _parse_transcript_metrics(path: Path, *, now: datetime) -> dict[str, Any]:
@@ -114,7 +123,9 @@ def _parse_transcript_metrics(path: Path, *, now: datetime) -> dict[str, Any]:
     prev_ctx = 0
     prev_model: str | None = None
     prev_planner_dt: datetime | None = None
+    prev_had_tools = False
     saw_checkpoint = False
+    saw_sys_msg = False
     current_trigger = "user"
 
     live_context_tokens = 0
@@ -152,6 +163,7 @@ def _parse_transcript_metrics(path: Path, *, now: datetime) -> dict[str, Any]:
                 continue
 
             if step_type == "SYSTEM_MESSAGE":
+                saw_sys_msg = True
                 if "Agent Board notification (" in content:
                     current_trigger = "webhook"
                 continue
@@ -182,6 +194,7 @@ def _parse_transcript_metrics(path: Path, *, now: datetime) -> dict[str, Any]:
             cache_r = int(obj.get("cache_read_tokens") or 0)
             out = int(obj.get("output_tokens") or 0)
             model = str(obj.get("model") or "") or None
+            has_tools = bool(obj.get("tool_calls"))
             ctx_tokens = inp + cache_r
             gap_s = (step_dt - prev_planner_dt).total_seconds() if prev_planner_dt is not None else 0.0
 
@@ -209,6 +222,15 @@ def _parse_transcript_metrics(path: Path, *, now: datetime) -> dict[str, Any]:
                     stats["user_uncached_5h"] += inp
 
                 if planner_count >= 2 and prev_ctx > 0:
+                    is_same_model = bool(prev_model and model and prev_model == model)
+                    is_partial = (
+                        cache_r > 0
+                        and not saw_checkpoint
+                        and (prev_model is None or model is None or prev_model == model)
+                        and gap_s < _IDLE_TTL_SECONDS
+                        and cache_r < (_PARTIAL_RETENTION_THRESHOLD * prev_ctx)
+                        and inp > _PARTIAL_MIN_UNCACHED
+                    )
                     if cache_r == 0:
                         if saw_checkpoint:
                             stats["hard_drops_5h"]["compaction"] += 1
@@ -218,21 +240,30 @@ def _parse_transcript_metrics(path: Path, *, now: datetime) -> dict[str, Any]:
                             stats["hard_drops_5h"]["idle_ttl"] += 1
                         else:
                             stats["hard_drops_5h"]["clean_active"] += 1
-                    elif (
-                        not saw_checkpoint
-                        and (prev_model is None or model is None or prev_model == model)
-                        and gap_s < _IDLE_TTL_SECONDS
-                        and cache_r < (_PARTIAL_RETENTION_THRESHOLD * prev_ctx)
-                        and inp > _PARTIAL_MIN_UNCACHED
-                    ):
+                    elif is_partial:
                         stats["partial_collapses_5h"] += 1
                         stats["partial_collapse_uncached_5h"] += inp
+
+                    if (
+                        saw_sys_msg
+                        and not prev_had_tools
+                        and not saw_checkpoint
+                        and is_same_model
+                        and gap_s < _IDLE_TTL_SECONDS
+                    ):
+                        stats["idle_wake_total_5h"] += 1
+                        if cache_r == 0:
+                            stats["idle_wake_zero_5h"] += 1
+                        elif is_partial:
+                            stats["idle_wake_partial_5h"] += 1
 
             prev_ctx = ctx_tokens
             if model:
                 prev_model = model
             prev_planner_dt = step_dt
+            prev_had_tools = has_tools
             saw_checkpoint = False
+            saw_sys_msg = False
 
     return {
         "stats": stats,
@@ -493,7 +524,8 @@ def dispatch_telemetry_alerts(
     ]
     for a in due:
         lines.append(f"- **[{str(a['severity']).upper()}]** {a['message']}")
-    lines.extend(["", "Run `/compact` on any oversized tab above 180k context tokens, or check `/monitor`."])
+    warn_k = int((snapshot.get("thresholds") or {}).get("context_warn_tokens", 150_000)) // 1000
+    lines.extend(["", f"Run `/compact` on any oversized tab above {warn_k}k context tokens, or check `/monitor`."])
 
     resp = client.post(
         f"/boards/{alert_board.strip()}/messages",

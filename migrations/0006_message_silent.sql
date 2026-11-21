@@ -1,0 +1,1 @@
+ALTER TABLE messages ADD COLUMN silent INTEGER NOT NULL DEFAULT 0 CHECK (silent IN (0, 1));

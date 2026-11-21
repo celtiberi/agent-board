@@ -169,6 +169,68 @@ def test_recover_one_board_filters_mentions_notes_and_self(tmp_path: Path, monke
     assert item2["latest_seq"] == 14
     assert item2["mentioned"] is False
 
+    # 3. silent=True closures (e.g. status posted with to=[]) are skipped even when mentions_only=False.
+    state.mark_dispatched("alpha", "dev-agent", 14, "catchup-alpha-dev-agent-14")
+    msgs_3 = [
+        {"seq": 15, "author_handle": "owner", "type": "status", "silent": True, "to": [], "mentions": []},
+    ]
+    q3: queue.Queue[dict[str, object] | None] = queue.Queue()
+    with httpx.Client(base_url="http://board.test/api/v1", transport=_mock_transport(msgs_3)) as c:
+        _recover_one_board(
+            c,
+            state,
+            q3,
+            slug="alpha",
+            handle="dev-agent",
+            sub_id="sub-1",
+            mentions_only=False,
+            allowed_types=ACTIONABLE_MESSAGE_TYPES_SET,
+        )
+    assert q3.empty()
+
+    # 4. When dnd_active=True, non-urgent messages stay deferred and do NOT advance last_dispatched_seq;
+    #    priority='urgent' wakes immediately with urgent=True.
+    msgs_4 = [
+        {"seq": 16, "author_handle": "owner", "type": "task", "priority": "normal", "to": ["dev-agent"]},
+    ]
+    q4: queue.Queue[dict[str, object] | None] = queue.Queue()
+    with httpx.Client(base_url="http://board.test/api/v1", transport=_mock_transport(msgs_4)) as c:
+        _recover_one_board(
+            c,
+            state,
+            q4,
+            slug="alpha",
+            handle="dev-agent",
+            sub_id="sub-1",
+            mentions_only=False,
+            allowed_types=ACTIONABLE_MESSAGE_TYPES_SET,
+            dnd_active=True,
+        )
+    assert q4.empty()
+    assert state.get_last_seq("alpha", "dev-agent") == 14
+
+    msgs_5 = [
+        {"seq": 16, "author_handle": "owner", "type": "task", "priority": "normal", "to": ["dev-agent"]},
+        {"seq": 17, "author_handle": "owner", "type": "task", "priority": "urgent", "to": ["dev-agent"]},
+    ]
+    q5: queue.Queue[dict[str, object] | None] = queue.Queue()
+    with httpx.Client(base_url="http://board.test/api/v1", transport=_mock_transport(msgs_5)) as c:
+        _recover_one_board(
+            c,
+            state,
+            q5,
+            slug="alpha",
+            handle="dev-agent",
+            sub_id="sub-1",
+            mentions_only=False,
+            allowed_types=ACTIONABLE_MESSAGE_TYPES_SET,
+            dnd_active=True,
+        )
+    item5 = q5.get_nowait()
+    assert item5 is not None
+    assert item5["latest_seq"] == 17
+    assert item5["urgent"] is True
+
 
 def test_webhook_handler_auth_hmac_and_wildcard_enqueue(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch

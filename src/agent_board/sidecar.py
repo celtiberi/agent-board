@@ -438,6 +438,7 @@ def _recover_one_board(
     sub_id: str,
     mentions_only: bool,
     allowed_types: frozenset[str] | set[str],
+    dnd_active: bool = False,
 ) -> None:
     b_resp = client.get(f"/boards/{slug}")
     if b_resp.status_code != 200:
@@ -457,6 +458,8 @@ def _recover_one_board(
     for m in messages:
         if str(m.get("author_handle", "")).strip().lower() == handle:
             continue
+        if bool(m.get("silent")):
+            continue
         raw_to = m.get("to") if "to" in m else (m.get("mentions") or [])
         to_list = [str(x).strip().lower() for x in (raw_to or [])]
         mtype = str(m.get("type", "")).strip()
@@ -467,6 +470,11 @@ def _recover_one_board(
             if not mentions_only and mtype in allowed_types:
                 matching.append(m)
     if not matching:
+        return
+
+    has_urgent = any(str(m.get("priority", "normal")).strip().lower() == "urgent" for m in matching)
+    if dnd_active and not has_urgent:
+        logger.info("Recovery deferred for @%s on board %s (DND active, no urgent messages)", handle, slug)
         return
 
     max_seq = max(int(m["seq"]) for m in matching)
@@ -491,6 +499,7 @@ def _recover_one_board(
                     in [str(x).strip().lower() for x in ((m.get("to") if "to" in m else m.get("mentions")) or [])]
                     for m in matching
                 ),
+                "urgent": has_urgent,
                 "trigger_seqs": trigger_seqs,
                 "trigger_threads": seen_threads[-10:],
                 "nudge_id": catchup_id,
@@ -553,6 +562,15 @@ def _recover_missed_activity(
             headers={"Authorization": f"Bearer {agent_token}"},
             timeout=15.0,
         ) as client:
+            dnd_active = False
+            try:
+                me_resp = client.get("/me")
+                if me_resp.status_code == 200:
+                    me_data = me_resp.json()
+                    dnd_active = bool((me_data.get("principal") or {}).get("dnd", {}).get("active", False))
+            except Exception as exc:
+                logger.warning("Recovery /me DND check for @%s failed: %s", handle, exc)
+
             if slug == "*":
                 b_list = client.get("/boards")
                 if b_list.status_code != 200:
@@ -575,6 +593,7 @@ def _recover_missed_activity(
                         sub_id=sub_id,
                         mentions_only=mentions_only,
                         allowed_types=allowed_types,
+                        dnd_active=dnd_active,
                     )
             else:
                 _recover_one_board(
@@ -586,6 +605,7 @@ def _recover_missed_activity(
                     sub_id=sub_id,
                     mentions_only=mentions_only,
                     allowed_types=allowed_types,
+                    dnd_active=dnd_active,
                 )
 
 

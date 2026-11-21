@@ -250,6 +250,7 @@ def _hydrate_messages(conn: sqlite3.Connection, rows: list[sqlite3.Row]) -> list
                 "author_handle": r["author_handle"],
                 "type": r["type"],
                 "priority": r["priority"] if "priority" in keys and r["priority"] else "normal",
+                "silent": bool(r["silent"]) if "silent" in keys else False,
                 "body_md": r["body_md"],
                 "data": json.loads(r["data"]) if r["data"] is not None else None,
                 "warnings": json.loads(r["warnings_json"]),
@@ -411,6 +412,7 @@ def post_message_in_tx(
 
     msg_id = new_ulid()
     seq = boards_store.allocate_next_seq(conn, board["id"])
+    is_silent = bool(suppress_wake or (is_directed and not to_ids and not is_broadcast))
     root_rowid = messages_store.insert_message(
         conn,
         message_id=msg_id,
@@ -420,6 +422,7 @@ def post_message_in_tx(
         author_id=ctx.principal_id,
         msg_type=msg_type,
         priority=clean_priority,
+        silent=is_silent,
         body_md=clean_body,
         data_json=json.dumps(clean_data) if clean_data is not None else None,
         warnings_json=json.dumps(warnings),
@@ -638,6 +641,7 @@ def edit_message(
             new_id = new_ulid()
             seq = boards_store.allocate_next_seq(conn, board["id"])
             target_priority = target["priority"] if "priority" in target.keys() and target["priority"] else "normal"
+            is_silent = bool(is_directed and not to_ids and not is_broadcast)
             root_rowid = messages_store.insert_message(
                 conn,
                 message_id=new_id,
@@ -647,6 +651,7 @@ def edit_message(
                 author_id=ctx.principal_id,
                 msg_type=target["type"],
                 priority=target_priority,
+                silent=is_silent,
                 body_md=clean_body,
                 data_json=json.dumps(clean_data) if clean_data is not None else None,
                 warnings_json=json.dumps(warnings),

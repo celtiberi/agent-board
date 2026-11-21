@@ -110,7 +110,7 @@ def test_collect_telemetry_and_cooldown_alert_dedup(tmp_path: Path) -> None:
     )
 
     thresholds = TelemetryThresholds(
-        context_warn_tokens=180_000,
+        context_warn_tokens=150_000,
         context_critical_tokens=280_000,
         agent_uncached_5h=500_000,
         global_uncached_5h=5_000_000,
@@ -138,6 +138,8 @@ def test_collect_telemetry_and_cooldown_alert_dedup(tmp_path: Path) -> None:
     assert a["hard_drops_5h"]["idle_ttl"] == 1
     assert a["hard_drops_5h"]["model_switch"] == 1
     assert a["partial_collapses_5h"] == 1
+    assert snap["thresholds"]["context_warn_tokens"] == 150_000
+    assert TelemetryThresholds().context_warn_tokens == 150_000
 
     alert_kinds = {al["kind"] for al in snap["alerts"]}
     assert {
@@ -146,6 +148,95 @@ def test_collect_telemetry_and_cooldown_alert_dedup(tmp_path: Path) -> None:
         "unattended_webhook_drain",
         "partial_collapse_spike",
     } <= alert_kinds
+
+
+def test_idle_wake_miss_metric_excludes_midloop_system_messages(tmp_path: Path) -> None:
+    now = datetime(2026, 11, 21, 21, 0, 0, tzinfo=UTC)
+    brain_dir = tmp_path / "brain"
+    active_conv_path = tmp_path / "active_conversations.json"
+    active_conv_path.write_text("{}", encoding="utf-8")
+
+    # Sequence within <3m on same model:
+    # 0->2: idle turn ended (no tool_calls), SYSTEM_MESSAGE wake -> partial collapse (miss)
+    # 2->4: mid-loop turn (tool_calls non-empty), SYSTEM_MESSAGE arrives -> ignored by idle-wake metric even if partial
+    # 4->6: idle turn ended (no tool_calls), SYSTEM_MESSAGE wake -> cr=0 (miss)
+    # 6->8: idle turn ended (no tool_calls), SYSTEM_MESSAGE wake -> clean cache hit
+    events = [
+        {
+            "step_index": 0,
+            "type": "PLANNER_RESPONSE",
+            "model": "gemini-4-neon-xhigh",
+            "input_tokens": 10_000,
+            "cache_read_tokens": 190_000,
+            "created_at": dt_to_iso(now - timedelta(minutes=10)),
+        },
+        {
+            "step_index": 1,
+            "type": "SYSTEM_MESSAGE",
+            "content": "Agent Board notification (webhook) wake 1",
+            "created_at": dt_to_iso(now - timedelta(minutes=9)),
+        },
+        {
+            "step_index": 2,
+            "type": "PLANNER_RESPONSE",
+            "model": "gemini-4-neon-xhigh",
+            "input_tokens": 182_000,
+            "cache_read_tokens": 18_000,
+            "tool_calls": [{"name": "read_file"}],
+            "created_at": dt_to_iso(now - timedelta(minutes=8, seconds=50)),
+        },
+        {
+            "step_index": 3,
+            "type": "SYSTEM_MESSAGE",
+            "content": "Background task notification mid-loop",
+            "created_at": dt_to_iso(now - timedelta(minutes=8, seconds=40)),
+        },
+        {
+            "step_index": 4,
+            "type": "PLANNER_RESPONSE",
+            "model": "gemini-4-neon-xhigh",
+            "input_tokens": 180_000,
+            "cache_read_tokens": 20_000,
+            "created_at": dt_to_iso(now - timedelta(minutes=8, seconds=30)),
+        },
+        {
+            "step_index": 5,
+            "type": "SYSTEM_MESSAGE",
+            "content": "Agent Board notification (webhook) wake 2",
+            "created_at": dt_to_iso(now - timedelta(minutes=8)),
+        },
+        {
+            "step_index": 6,
+            "type": "PLANNER_RESPONSE",
+            "model": "gemini-4-neon-xhigh",
+            "input_tokens": 200_000,
+            "cache_read_tokens": 0,
+            "created_at": dt_to_iso(now - timedelta(minutes=7, seconds=50)),
+        },
+        {
+            "step_index": 7,
+            "type": "SYSTEM_MESSAGE",
+            "content": "Agent Board notification (webhook) wake 3",
+            "created_at": dt_to_iso(now - timedelta(minutes=7)),
+        },
+        {
+            "step_index": 8,
+            "type": "PLANNER_RESPONSE",
+            "model": "gemini-4-neon-xhigh",
+            "input_tokens": 2_000,
+            "cache_read_tokens": 200_000,
+            "created_at": dt_to_iso(now - timedelta(minutes=6, seconds=50)),
+        },
+    ]
+    _write_transcript(brain_dir / "conv-idle-test" / ".system_generated" / "logs" / "transcript.jsonl", events)
+
+    snap = collect_antigravity_telemetry(brain_dir, active_conv_path, host_id="idle-host", now=now)
+    g = snap["global"]
+    assert g["idle_wake_total_5h"] == 3
+    assert g["idle_wake_partial_5h"] == 1
+    assert g["idle_wake_zero_5h"] == 1
+    assert g["idle_wake_miss_rate_5h"] == 66.7
+    assert g["partial_collapses_5h"] == 2
 
 
 def test_telemetry_endpoint_alerts_cooldown_and_monitor_render(env, tmp_path: Path) -> None:
@@ -166,7 +257,7 @@ def test_telemetry_endpoint_alerts_cooldown_and_monitor_render(env, tmp_path: Pa
     payload = {
         "host_id": "test-host",
         "collected_at": "2026-11-21T20:00:00Z",
-        "thresholds": {"context_warn_tokens": 180000},
+        "thresholds": {"context_warn_tokens": 150000, "context_critical_tokens": 280000},
         "global": {
             "uncached_1h": 250000,
             "uncached_5h": 600000,
@@ -175,6 +266,10 @@ def test_telemetry_endpoint_alerts_cooldown_and_monitor_render(env, tmp_path: Pa
             "hit_rate_5h": 66.7,
             "webhook_uncached_5h": 500000,
             "partial_collapses_5h": 2,
+            "idle_wake_total_5h": 10,
+            "idle_wake_partial_5h": 2,
+            "idle_wake_zero_5h": 1,
+            "idle_wake_miss_rate_5h": 30.0,
             "sessions_scanned": 3,
         },
         "agents": {
@@ -279,6 +374,8 @@ def test_telemetry_endpoint_alerts_cooldown_and_monitor_render(env, tmp_path: Pa
     trusted = TestClient(app, client=("100.64.0.10", 51000))
     mon_json = trusted.get("/monitor/data?hours=24").json()
     assert mon_json["telemetry"]["host_id"] == "test-host"
+    assert mon_json["telemetry"]["thresholds"]["context_warn_tokens"] == 150000
+    assert mon_json["telemetry"]["global"]["idle_wake_miss_rate_5h"] == 30.0
     bob_row = next(r for r in mon_json["agent_matrix"] if r["board_slug"] == "alpha" and r["handle"] == "bob")
     assert bob_row["dnd"]["active"] is True
     assert bob_row["telemetry"]["live_context_tokens"] == 210000
@@ -287,6 +384,8 @@ def test_telemetry_endpoint_alerts_cooldown_and_monitor_render(env, tmp_path: Pa
     mon_html = trusted.get("/monitor")
     assert mon_html.status_code == 200
     assert "Token &amp; Cache Telemetry" in mon_html.text
+    assert "Idle-turn wake miss (5h):" in mon_html.text
+    assert "30.0% (2p+1z/10)" in mon_html.text
     assert "210k ctx" in mon_html.text
     assert "DND until" in mon_html.text
     assert "URGENT" in mon_html.text

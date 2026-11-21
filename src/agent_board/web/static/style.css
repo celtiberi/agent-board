@@ -326,3 +326,229 @@ summary {
   font-weight: 600;
   color: var(--primary);
 }
+
+main.container:has(.monitor-shell) {
+  max-width: 1260px;
+}
+
+.monitor-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.monitor-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 0.65rem;
+}
+
+.monitor-filters label {
+  margin-top: 0;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.monitor-filters select {
+  width: auto;
+  min-width: 130px;
+  font-size: 0.9rem;
+  padding: 0.35rem 0.55rem;
+}
+
+.monitor-live-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.65rem;
+}
+
+.monitor-live-controls label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  margin: 0;
+  font-weight: 500;
+  font-size: 0.88rem;
+  cursor: pointer;
+}
+
+.kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(175px, 1fr));
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+}
+
+.kpi-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.85rem 1rem;
+}
+
+.kpi-label {
+  font-size: 0.78rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--muted);
+}
+
+.kpi-value {
+  font-size: 1.65rem;
+  font-weight: 700;
+  line-height: 1.2;
+  margin: 0.2rem 0;
+}
+
+.kpi-sub {
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.monitor-split {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+  gap: 1rem;
+}
+
+.chart-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  font-size: 0.84rem;
+  color: var(--muted);
+  margin-bottom: 0.35rem;
+}
+
+.legend-swatch {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  margin-right: 0.3rem;
+  vertical-align: middle;
+}
+
+.chart-wrap {
+  width: 100%;
+  overflow-x: auto;
+}
+
+.chart-wrap svg {
+  width: 100%;
+  height: auto;
+  min-width: 540px;
+  display: block;
+}
+
+.progress-row {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  min-width: 135px;
+}
+
+.progress-track {
+  flex: 1 1 auto;
+  height: 8px;
+  background: #e2e8f0;
+  border-radius: 999px;
+  overflow: hidden;
+  min-width: 60px;
+}
+
+.progress-fill {
+  height: 100%;
+  background: #16a34a;
+  border-radius: 999px;
+}
+
+.progress-fill.lagging {
+  background: #d97706;
+}
+
+.badge-ok { background: var(--ok-bg); color: var(--ok-text); }
+.badge-disabled { background: #fee2e2; color: #991b1b; }
+.badge-failing { background: var(--warn-bg); color: var(--warn-text); }
+.badge-no_webhook, .badge-no-webhook { background: #e0e7ff; color: #3730a3; }
+.badge-human { background: #f1f5f9; color: #475569; }
+.badge-sent { background: var(--ok-bg); color: var(--ok-text); }
+.badge-suppressed { background: #f1f5f9; color: #475569; }
+.badge-pending, .badge-sending { background: #dbeafe; color: #1e40af; }
+.badge-dead { background: #fee2e2; color: #991b1b; }
+.badge-in_progress { background: #dbeafe; color: #1e40af; }
+.badge-open { background: #fef3c7; color: #92400e; }
+
+.tag-chip {
+  display: inline-block;
+  padding: 0.05rem 0.38rem;
+  border-radius: 4px;
+  font-size: 0.74rem;
+  background: #f1f5f9;
+  color: #334155;
+  border: 1px solid #cbd5e1;
+}
+
+.interaction-row {
+  margin-bottom: 0.55rem;
+}
+
+.interaction-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+  font-size: 0.86rem;
+  margin-bottom: 0.2rem;
+}
+
+.interaction-bar-bg {
+  height: 8px;
+  background: #f1f5f9;
+  border-radius: 999px;
+  overflow: hidden;
+  display: flex;
+}
+
+.interaction-bar-to {
+  background: #2563eb;
+  height: 100%;
+}
+
+.interaction-bar-cc {
+  background: #94a3b8;
+  height: 100%;
+}
+
+.feed-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.feed-item {
+  border: 1px solid var(--border);
+  border-left: 4px solid var(--primary);
+  border-radius: 6px;
+  padding: 0.65rem 0.8rem;
+  background: #ffffff;
+}
+
+.feed-item-top {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 0.4rem;
+  margin-bottom: 0.25rem;
+}
+
+.feed-preview {
+  font-size: 0.92rem;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}

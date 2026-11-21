@@ -242,7 +242,13 @@ def build_mcp_server(services: AppServices) -> tuple[MCPServer, ASGIApp]:
             fn=lambda ctx: {"decisions": decisions_svc.list_decisions(services, ctx, board_slug=board, status=status)},
         )
 
-    @mcp.tool(description="Record a new pinned decision (D-n) and corresponding decision message.")
+    @mcp.tool(
+        description=(
+            "Record a new pinned decision (D-n) and corresponding decision message. "
+            "Do not include a 'D-n:' prefix in title (the server assigns the next number); "
+            "use supersede_decision when clarifying or replacing an existing decision."
+        )
+    )
     def record_decision(
         board: str,
         title: str,

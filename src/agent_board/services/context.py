@@ -28,7 +28,7 @@ class AuthContext:
     kind: str
     display_name: str
     is_server_owner: bool
-    auth_kind: str  # "token" | "session" | "system"
+    auth_kind: str  # "token" | "session" | "trusted_ip" | "system"
     token_id: str | None = None
     token_prefix: str | None = None
     board_scope: tuple[str, ...] = ("*",)

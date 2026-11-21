@@ -224,3 +224,96 @@ def test_brief_lists_members_and_tags(env: BoardTestEnv) -> None:
     assert "**Members:**" in brief["markdown"]
     assert "@bob [qa]" in brief["markdown"]
     assert "@mac-dev-ai [dev, infra]" in brief["markdown"]
+
+
+def test_brief_to_inferred_tasks_questions_and_self_post_cursor(env: BoardTestEnv) -> None:
+    # Self-addressed task/question should not populate caller's own action items
+    messages_svc.post_message(
+        env.services,
+        env.bob_ctx,
+        board_slug="alpha",
+        msg_type="task",
+        thread_title="self-work",
+        body_md="Reminder for myself",
+        to=["bob"],
+    )
+    assert brief_svc.get_brief(env.services, env.bob_ctx, board_slug="alpha")["open_tasks_for_caller"] == []
+
+    # Never-acked principal stays at read_seq=0 even after posting (m1 above)
+    assert delivery_svc.get_cursor_status(env.services, env.bob_ctx, board_slug="alpha")["read_seq"] == 0
+
+    # Acknowledge seq 1 -> subsequent contiguous self-post advances cursor 1 -> 2
+    delivery_svc.ack_cursor(env.services, env.bob_ctx, board_slug="alpha", read_seq=1)
+    m2 = messages_svc.post_message(
+        env.services,
+        env.bob_ctx,
+        board_slug="alpha",
+        msg_type="note",
+        thread_title="cursor-check",
+        body_md="Contiguous own post",
+        to=[],
+    )
+    assert m2["seq"] == 2
+    assert delivery_svc.get_cursor_status(env.services, env.bob_ctx, board_slug="alpha")["read_seq"] == 2
+
+    # When teammate posts ahead (seq 3, 4), bob's own seq 5 must NOT skip bob past unread 3/4
+    task_for_bob = messages_svc.post_message(
+        env.services,
+        env.dev_ctx,
+        board_slug="alpha",
+        msg_type="task",
+        thread_title="deploy-qa",
+        body_md="Verify release candidate",
+        to=["bob"],
+    )
+    q_for_owner = messages_svc.post_message(
+        env.services,
+        env.dev_ctx,
+        board_slug="alpha",
+        msg_type="question",
+        thread_title="release-signoff",
+        body_md="Ship today?",
+        to=["owner"],
+    )
+    assert task_for_bob["seq"] == 3
+    assert q_for_owner["seq"] == 4
+
+    unrelated_post = messages_svc.post_message(
+        env.services,
+        env.bob_ctx,
+        board_slug="alpha",
+        msg_type="note",
+        thread_title="other",
+        body_md="Note while unread exists",
+        to=[],
+    )
+    assert unrelated_post["seq"] == 5
+    assert delivery_svc.get_cursor_status(env.services, env.bob_ctx, board_slug="alpha")["read_seq"] == 2
+
+    # Inferred task & question appear in brief even with data=None
+    bob_brief = brief_svc.get_brief(env.services, env.bob_ctx, board_slug="alpha")
+    assert [t["id"] for t in bob_brief["open_tasks_for_caller"]] == [task_for_bob["id"]]
+    owner_brief = brief_svc.get_brief(env.services, env.owner_ctx, board_slug="alpha")
+    assert [q["id"] for q in owner_brief["unanswered_questions_for_caller"]] == [q_for_owner["id"]]
+
+    # Thread-level retest_report / reply clears to-inferred task and question
+    messages_svc.post_message(
+        env.services,
+        env.bob_ctx,
+        board_slug="alpha",
+        msg_type="retest_report",
+        thread_id=task_for_bob["thread_id"],
+        body_md="QA verified cleanly",
+        to=[],
+    )
+    messages_svc.post_message(
+        env.services,
+        env.owner_ctx,
+        board_slug="alpha",
+        msg_type="note",
+        thread_id=q_for_owner["thread_id"],
+        body_md="Yes, ship it.",
+        to=["mac-dev-ai"],
+    )
+    assert brief_svc.get_brief(env.services, env.bob_ctx, board_slug="alpha")["open_tasks_for_caller"] == []
+    assert brief_svc.get_brief(env.services, env.owner_ctx, board_slug="alpha")["unanswered_questions_for_caller"] == []

@@ -18,6 +18,7 @@ from agent_board.http.models import (
     UpdatePrincipalRequest,
 )
 from agent_board.services import auth as auth_svc
+from agent_board.services import monitor as monitor_svc
 from agent_board.services import onboarding as onboarding_svc
 from agent_board.services import shout as shout_svc
 from agent_board.services.context import AppServices, AuthContext
@@ -188,6 +189,25 @@ def admin_audit(
     services: AppServices = Depends(get_services),
 ) -> dict[str, Any]:
     return {"entries": auth_svc.list_audit_logs(services, ctx, limit=limit)}
+
+
+@router.get("/admin/monitor")
+def admin_monitor(
+    hours: int = Query(default=24, ge=1, le=168),
+    board: str | None = Query(default=None),
+    agent: str | None = Query(default=None),
+    limit: int = Query(default=60, ge=1, le=200),
+    ctx: AuthContext = Depends(require_api_read),
+    services: AppServices = Depends(get_services),
+) -> dict[str, Any]:
+    return monitor_svc.get_monitor_snapshot(
+        services,
+        ctx,
+        hours=hours,
+        board_slug=board,
+        agent_handle=agent,
+        limit=limit,
+    )
 
 
 @router.get("/admin/backups")

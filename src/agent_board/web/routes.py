@@ -6,7 +6,7 @@ from datetime import date
 from typing import Any
 
 from fastapi import APIRouter, File, Form, Query, Request, UploadFile
-from fastapi.responses import FileResponse, PlainTextResponse, RedirectResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response
 
 from agent_board.errors import DomainError
 from agent_board.services import attachments as att_svc
@@ -17,6 +17,7 @@ from agent_board.services import decisions as decisions_svc
 from agent_board.services import delivery as delivery_svc
 from agent_board.services import issues as issues_svc
 from agent_board.services import messages as messages_svc
+from agent_board.services import monitor as monitor_svc
 from agent_board.services import search as search_svc
 from agent_board.web.common import (
     _TEMPLATES as _TEMPLATES,
@@ -103,6 +104,53 @@ def create_web_router() -> APIRouter:
             return _redirect("/login")
         boards = boards_svc.list_boards(_services(request), ctx)
         return _render(request, "boards.html", ctx=ctx, boards=boards)
+
+    @router.get("/monitor", response_model=None)
+    def web_monitor(
+        request: Request,
+        hours: int = Query(default=24, ge=1, le=168),
+        board: str = Query(default=""),
+        agent: str = Query(default=""),
+        limit: int = Query(default=60, ge=1, le=200),
+    ) -> Response:
+        ctx = _session_ctx(request)
+        if ctx is None:
+            return _redirect("/login")
+        auth_svc.require_server_owner(ctx)
+        snapshot = monitor_svc.get_monitor_snapshot(
+            _services(request),
+            ctx,
+            hours=hours,
+            board_slug=board or None,
+            agent_handle=agent or None,
+            limit=limit,
+        )
+        return _render(request, "monitor.html", ctx=ctx, snapshot=snapshot)
+
+    @router.get("/monitor/data", response_model=None)
+    def web_monitor_data(
+        request: Request,
+        hours: int = Query(default=24, ge=1, le=168),
+        board: str = Query(default=""),
+        agent: str = Query(default=""),
+        limit: int = Query(default=60, ge=1, le=200),
+    ) -> Response:
+        ctx = _session_ctx(request)
+        if ctx is None:
+            return JSONResponse(
+                status_code=401,
+                content={"error": {"code": "unauthorized", "message": "Login required"}},
+            )
+        auth_svc.require_server_owner(ctx)
+        snapshot = monitor_svc.get_monitor_snapshot(
+            _services(request),
+            ctx,
+            hours=hours,
+            board_slug=board or None,
+            agent_handle=agent or None,
+            limit=limit,
+        )
+        return JSONResponse(content=snapshot)
 
     @router.get("/b/{slug}", response_model=None)
     def board_home(request: Request, slug: str, state: str = Query(default="open")) -> Response:

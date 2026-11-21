@@ -38,7 +38,11 @@ def _services(request: Request) -> AppServices:
 def _session_ctx(request: Request) -> AuthContext | None:
     cookie = request.cookies.get("ab_session")
     ip = request.client.host if request.client else None
-    return auth_svc.authenticate_session(_services(request), cookie, ip=ip)
+    services = _services(request)
+    ctx = auth_svc.authenticate_session(services, cookie, ip=ip)
+    if ctx is not None:
+        return ctx
+    return auth_svc.authenticate_trusted_web_ip(services, ip=ip)
 
 
 def _require_csrf(ctx: AuthContext, submitted_token: str | None) -> None:

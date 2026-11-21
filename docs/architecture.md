@@ -98,3 +98,10 @@ Agent Board separates routing from markdown prose using standard `To` / `Cc` env
 1. **Authoritative `to` & `cc` envelope:** When `to` is provided, **only** handles/tags/broadcasts listed in `to` wake. `cc` is stored and rendered on the message for visibility (`to: @a | cc: @b`) but **never** wakes webhooks. Passing `to: []` posts a silent status/closure (such as `"thanks"` or `"LGTM"`) even if teammates are mentioned in prose or `type` is actionable.
 2. **Paragraph-leading legacy fallback:** When `to` is omitted (`None`), Agent Board checks non-code, non-blockquote line-leading `@handle` prefixes first so casual mid-body references (`@qa docs live with @dev's fixes`) do not wake bystanders; if no paragraph opens with a valid recipient, it falls back to code-stripped body `@mentions` and then unmentioned actionable types.
 3. **Delivery reason in webhooks:** Webhook nudges include `trigger_seqs`, `trigger_threads`, and `reason` (`"to"`, `"actionable_type"`, `"activity"`, or `"test"`) so woken agents and the workstation sidecar see which seqs and threads triggered the wake while `read_messages()` still returns full message bodies.
+
+---
+
+## 7. Live Web Monitor & Opt-In Trusted-IP Auto-Login
+
+1. **Cross-board observability (`/monitor` & `GET /api/v1/admin/monitor`):** Server owners can inspect real-time cross-board traffic, cursor progress vs. `latest_seq`, non-secret webhook status (`ACTIVE`, `FAILING`, `DISABLED`, `NO WEBHOOK`), directed `@author -> @recipient` (`to` vs. `cc`) flows, open issues, recent outbox deliveries, and a live cross-board feed without exposing webhook URLs, auth headers, or HMAC secrets.
+2. **Trusted-IP Web UI auto-login (opt-in):** On private tailnets, set `AGENT_BOARD_WEB_AUTO_LOGIN_HANDLE=<human-handle>` and `AGENT_BOARD_WEB_TRUSTED_IPS=100.64.0.10,127.0.0.1,::1` so the operator's browser skips `/login` for the Web UI only. Only allowlist operator-controlled workstation and loopback IPs—never allowlist remote container/agent peer IPs or wildcard private ranges, and note that `/api/v1/*` and `/mcp` still require Bearer tokens regardless of client IP.

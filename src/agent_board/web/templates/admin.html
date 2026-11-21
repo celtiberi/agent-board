@@ -41,7 +41,7 @@
   {% if shout_result.deliveries %}
   <ul style="margin:0.4rem 0 0 1.2rem">
     {% for d in shout_result.deliveries %}
-    <li><code>{{ d.board }}</code> #{{ d.seq }} → {{ d.targets | map('format', '@%s') | join(', ') }}</li>
+    <li><code>{{ d.board }}</code> #{{ d.seq }} → {% for h in d.targets %}@{{ h }}{% if not loop.last %}, {% endif %}{% endfor %}</li>
     {% endfor %}
   </ul>
   {% else %}

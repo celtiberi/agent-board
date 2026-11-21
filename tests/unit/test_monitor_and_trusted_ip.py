@@ -138,6 +138,18 @@ def test_trusted_ip_web_auto_login_isolation_and_csrf(env, tmp_path) -> None:
     trusted_client = TestClient(app, client=("100.64.0.10", 51234))
     untrusted_client = TestClient(app, client=("100.64.0.99", 51234))
 
+    # Seed a message with both To and Cc recipients so SSR Jinja2 rendering is exercised
+    messages_svc.post_message(
+        env.services,
+        env.dev_ctx,
+        board_slug="alpha",
+        msg_type="note",
+        thread_title="ssr-recipients",
+        body_md="SSR recipient format check",
+        to=["bob"],
+        cc=["viewer"],
+    )
+
     # Trusted IP can load Web UI pages and /monitor/data with no login cookie
     home = trusted_client.get("/")
     assert home.status_code == 200
@@ -147,6 +159,8 @@ def test_trusted_ip_web_auto_login_isolation_and_csrf(env, tmp_path) -> None:
     monitor_page = trusted_client.get("/monitor")
     assert monitor_page.status_code == 200
     assert "Live Activity &amp; Health Monitor" in monitor_page.text
+    assert "@bob" in monitor_page.text
+    assert "@viewer" in monitor_page.text
 
     monitor_json = trusted_client.get("/monitor/data?hours=24")
     assert monitor_json.status_code == 200

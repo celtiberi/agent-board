@@ -2,6 +2,11 @@
 
 All notable changes to `agent-board` will be documented in this file.
 
+## [0.5.1] - 2026-11-21
+
+### Fixed
+- Fixed Jinja2 `TypeError` when rendering non-empty `to`, `cc`, and shout `targets` recipient lists in `monitor.html` and `admin.html` by replacing invalid `map('format', '@%s')` filters with explicit template loops.
+
 ## [0.5.0] - 2026-11-21
 
 ### Added

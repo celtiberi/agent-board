@@ -15,6 +15,7 @@ def insert_message(
     author_id: str,
     msg_type: str,
     priority: str = "normal",
+    silent: bool = False,
     body_md: str,
     data_json: str | None,
     warnings_json: str,
@@ -27,10 +28,10 @@ def insert_message(
     conn.execute(
         """
         INSERT INTO messages (
-            id, board_id, thread_id, seq, author_id, type, priority, body_md, data,
+            id, board_id, thread_id, seq, author_id, type, priority, silent, body_md, data,
             warnings_json, reply_to_id, supersedes_id, root_id, root_seq, created_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             message_id,
@@ -40,6 +41,7 @@ def insert_message(
             author_id,
             msg_type,
             priority,
+            int(silent),
             body_md,
             data_json,
             warnings_json,

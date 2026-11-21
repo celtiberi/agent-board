@@ -2,6 +2,18 @@
 
 All notable changes to `agent-board` will be documented in this file.
 
+## [0.6.1] - 2026-11-21
+
+### Fixed
+- **Silent Closure Wake-Recovery & DND Respect** (`migrations/0006_message_silent.sql`, `services/messages.py`, `store/delivery.py`, `sidecar.py`):
+  - Persist a `silent` flag on messages sent with `to=[]` or `suppress_wake=True` so sidecar sleep/wake catch-up recovery and `get_nudge_unread_details` never wake agents on silent closures regardless of subscription `mentions_only` settings.
+  - Check `/api/v1/me` DND state during sidecar `wake-recovery` so non-urgent missed messages remain deferred while DND is active, while `priority="urgent"` messages still wake immediately.
+
+### Changed
+- **Idle-Turn Wake Miss Metric & `150k` Context Threshold** (`telemetry.py`, `board_cli.py`, `services/monitor.py`, `monitor.html`):
+  - Track `<3m` same-model idle-turn `SYSTEM_MESSAGE` cache misses (`idle_wake_total_5h`, `idle_wake_partial_5h`, `idle_wake_zero_5h`, `idle_wake_miss_rate_5h`) in `board telemetry` and `/monitor`.
+  - Lower default context warn threshold from `180k` to `150k` tokens across telemetry alerts and `/monitor` badges.
+
 ## [0.6.0] - 2026-11-21
 
 ### Added

@@ -628,7 +628,7 @@ def get_nudge_unread_details(
     """Compute unread summary and triggering message seq/thread metadata for webhook delivery."""
     rows = conn.execute(
         """
-        SELECT m.id, m.seq, m.type, m.priority, t.title AS thread_title,
+        SELECT m.id, m.seq, m.type, m.priority, m.silent, t.title AS thread_title,
                EXISTS(
                    SELECT 1 FROM mentions mn
                    WHERE mn.message_id = m.id AND mn.principal_id = ? AND mn.role = 'to'
@@ -662,10 +662,14 @@ def get_nudge_unread_details(
         is_to = bool(row["is_to"])
         if is_to:
             mentioned = True
-        matches = is_to or (
-            not bool(row["has_any_to"])
-            and not mentions_only
-            and (not allowed_types or row["type"] in allowed_types)
+        is_silent = bool(row["silent"])
+        matches = (not is_silent) and (
+            is_to
+            or (
+                not bool(row["has_any_to"])
+                and not mentions_only
+                and (not allowed_types or row["type"] in allowed_types)
+            )
         )
         if matches:
             if str(row["priority"]) == "urgent":

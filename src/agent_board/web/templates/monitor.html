@@ -96,6 +96,7 @@
       Cache hit: <strong>{% if tg.hit_rate_5h is not none %}{{ tg.hit_rate_5h }}%{% else %}—{% endif %}</strong> ·
       Webhook 5h uncached: <strong>{{ "{:,}".format(tg.webhook_uncached_5h | default(0)) }}</strong> ·
       Active collapses (5h): <strong>{{ tg.partial_collapses_5h | default(0) }}</strong> ·
+      Idle-turn wake miss (5h): <strong>{% if tg.idle_wake_total_5h | default(0) > 0 and tg.idle_wake_miss_rate_5h is not none %}{{ tg.idle_wake_miss_rate_5h }}% ({{ tg.idle_wake_partial_5h | default(0) }}p+{{ tg.idle_wake_zero_5h | default(0) }}z/{{ tg.idle_wake_total_5h }}){% else %}—{% endif %}</strong> ·
       Sessions: <strong>{{ tg.sessions_scanned | default(0) }}</strong>
       {% endif %}
     </div>
@@ -237,8 +238,11 @@
             <td class="meta">{{ row.webhook.last_sent_local }}</td>
             <td>
               {% if row.telemetry %}
+                {% set tel_thr = snapshot.telemetry.thresholds if snapshot.telemetry and snapshot.telemetry.thresholds else {} %}
+                {% set warn_tok = tel_thr.get('context_warn_tokens', 150000) %}
+                {% set crit_tok = tel_thr.get('context_critical_tokens', 280000) %}
                 {% set ctx_k = (row.telemetry.live_context_tokens // 1000) %}
-                <span class="badge {% if row.telemetry.live_context_tokens >= 280000 %}badge-disabled{% elif row.telemetry.live_context_tokens >= 180000 %}badge-warn{% else %}badge-human{% endif %}">{{ ctx_k }}k ctx</span>
+                <span class="badge {% if row.telemetry.live_context_tokens >= crit_tok %}badge-disabled{% elif row.telemetry.live_context_tokens >= warn_tok %}badge-warn{% else %}badge-human{% endif %}">{{ ctx_k }}k ctx</span>
                 <div class="meta">
                   {{ "{:,}".format(row.telemetry.uncached_5h) }} uncached
                   {% if row.telemetry.hit_rate_5h is not none %}· {{ row.telemetry.hit_rate_5h }}% hit{% endif %}
@@ -446,6 +450,12 @@
     sFrag.appendChild(el("strong", null, formatNum(g.webhook_uncached_5h)));
     sFrag.appendChild(document.createTextNode(" · Active collapses (5h): "));
     sFrag.appendChild(el("strong", null, String(g.partial_collapses_5h || 0)));
+    var iwTot = Number(g.idle_wake_total_5h || 0);
+    var iwTxt = (iwTot > 0 && g.idle_wake_miss_rate_5h !== null && g.idle_wake_miss_rate_5h !== undefined)
+      ? (g.idle_wake_miss_rate_5h + "% (" + Number(g.idle_wake_partial_5h || 0) + "p+" + Number(g.idle_wake_zero_5h || 0) + "z/" + iwTot + ")")
+      : "—";
+    sFrag.appendChild(document.createTextNode(" · Idle-turn wake miss (5h): "));
+    sFrag.appendChild(el("strong", null, iwTxt));
     sFrag.appendChild(document.createTextNode(" · Sessions: "));
     sFrag.appendChild(el("strong", null, String(g.sessions_scanned || 0)));
     sumEl.replaceChildren(sFrag);
@@ -643,8 +653,11 @@
 
       var tdTel = document.createElement("td");
       if (r.telemetry) {
+        var telThr = (data.telemetry && data.telemetry.thresholds) ? data.telemetry.thresholds : {};
+        var warnTok = Number(telThr.context_warn_tokens || 150000);
+        var critTok = Number(telThr.context_critical_tokens || 280000);
         var ctxTok = Number(r.telemetry.live_context_tokens || 0);
-        var ctxBadgeCls = ctxTok >= 280000 ? "badge badge-disabled" : (ctxTok >= 180000 ? "badge badge-warn" : "badge badge-human");
+        var ctxBadgeCls = ctxTok >= critTok ? "badge badge-disabled" : (ctxTok >= warnTok ? "badge badge-warn" : "badge badge-human");
         tdTel.appendChild(el("span", ctxBadgeCls, Math.floor(ctxTok / 1000) + "k ctx"));
         var subText = formatNum(r.telemetry.uncached_5h) + " uncached";
         if (r.telemetry.hit_rate_5h !== null && r.telemetry.hit_rate_5h !== undefined) {

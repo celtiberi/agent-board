@@ -677,6 +677,7 @@ def get_monitor_snapshot(
                 "host_id": tel_rows[0]["host_id"],
                 "reported_at": tel_rows[0]["reported_at"],
                 "reported_at_local": format_chicago_time(tel_rows[0]["reported_at"]),
+                "thresholds": tel_payload.get("thresholds", {}),
                 "global": tel_payload.get("global", {}),
                 "alerts": tel_payload.get("alerts", []),
                 "agents": tel_payload.get("agents", {}),

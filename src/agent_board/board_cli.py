@@ -397,9 +397,17 @@ def telemetry(
 
     g = snap["global"]
     hit_str = f"{g['hit_rate_5h']}%" if g["hit_rate_5h"] is not None else "—"
+    iw_tot = int(g.get("idle_wake_total_5h", 0))
+    iw_rate = g.get("idle_wake_miss_rate_5h")
+    iw_str = (
+        f"{iw_rate}% ({g.get('idle_wake_partial_5h', 0)}p+{g.get('idle_wake_zero_5h', 0)}z/{iw_tot})"
+        if iw_tot > 0 and iw_rate is not None
+        else "—"
+    )
     typer.echo(
         f"Host {snap['host_id']} · 5h uncached={g['uncached_5h']:,} · hit={hit_str} · "
-        f"partial_collapses={g['partial_collapses_5h']} · sessions={g['sessions_scanned']}"
+        f"partial_collapses={g['partial_collapses_5h']} · idle_wake_miss={iw_str} · "
+        f"sessions={g['sessions_scanned']}"
     )
     for handle, info in sorted(snap["agents"].items()):
         ah = f"{info['hit_rate_5h']}%" if info["hit_rate_5h"] is not None else "—"

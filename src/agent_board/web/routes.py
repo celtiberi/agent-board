@@ -152,6 +152,58 @@ def create_web_router() -> APIRouter:
         )
         return JSONResponse(content=snapshot)
 
+    @router.post("/monitor/reply", response_model=None)
+    def web_monitor_reply(
+        request: Request,
+        csrf_token: str = Form(...),
+        board_slug: str = Form(...),
+        thread_id: str = Form(...),
+        reply_to_id: str = Form(default=""),
+        to_handle: str = Form(default=""),
+        body_md: str = Form(...),
+    ) -> Response:
+        ctx = _session_ctx(request)
+        wants_json = "application/json" in (request.headers.get("accept") or "").lower()
+        if ctx is None:
+            if wants_json:
+                return JSONResponse(
+                    status_code=401,
+                    content={"error": {"code": "unauthorized", "message": "Login required"}},
+                )
+            return _redirect("/login")
+        auth_svc.require_server_owner(ctx)
+        _require_csrf(ctx, csrf_token)
+        clean_handle = to_handle.strip().lstrip("@")
+        clean_to = [clean_handle] if clean_handle else None
+        try:
+            msg = messages_svc.post_message(
+                _services(request),
+                ctx,
+                board_slug=board_slug.strip(),
+                thread_id=thread_id.strip(),
+                msg_type="note",
+                body_md=body_md,
+                to=clean_to,
+                reply_to_id=reply_to_id.strip() or None,
+            )
+        except DomainError as exc:
+            if exc.status_code == 400 and clean_to and "Unknown recipient" in exc.message:
+                msg = messages_svc.post_message(
+                    _services(request),
+                    ctx,
+                    board_slug=board_slug.strip(),
+                    thread_id=thread_id.strip(),
+                    msg_type="note",
+                    body_md=body_md,
+                    to=None,
+                    reply_to_id=reply_to_id.strip() or None,
+                )
+            else:
+                raise
+        if wants_json:
+            return JSONResponse(content={"ok": True, "id": msg["id"], "seq": msg["seq"]})
+        return _redirect("/monitor")
+
     @router.get("/b/{slug}", response_model=None)
     def board_home(request: Request, slug: str, state: str = Query(default="open")) -> Response:
         ctx = _session_ctx(request)

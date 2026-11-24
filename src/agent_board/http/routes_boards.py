@@ -12,7 +12,9 @@ from agent_board.http.models import (
     AckRequest,
     CreateBoardRequest,
     CreateThreadRequest,
+    CreateTimerRequest,
     SetDndRequest,
+    SetThreadHandoffRequest,
     UpdateBoardRequest,
 )
 from agent_board.services import boards as boards_svc
@@ -20,6 +22,7 @@ from agent_board.services import brief as brief_svc
 from agent_board.services import delivery as delivery_svc
 from agent_board.services import messages as messages_svc
 from agent_board.services import search as search_svc
+from agent_board.services import timers as timers_svc
 from agent_board.services.context import AppServices, AuthContext
 from agent_board.store import principals as principals_store
 
@@ -211,6 +214,71 @@ def reopen_thread(
     services: AppServices = Depends(get_services),
 ) -> dict[str, Any]:
     return boards_svc.close_thread(services, ctx, board_slug=slug, thread_id=thread_id, closed=False)
+
+
+@router.put("/boards/{slug}/threads/{thread_id}/handoff")
+def set_thread_handoff(
+    slug: str,
+    thread_id: str,
+    body: SetThreadHandoffRequest,
+    ctx: AuthContext = Depends(require_api_write),
+    services: AppServices = Depends(get_services),
+) -> dict[str, Any]:
+    return boards_svc.set_thread_handoff(
+        services,
+        ctx,
+        board_slug=slug,
+        thread_id=thread_id,
+        handoff_md=body.handoff_md,
+    )
+
+
+@router.get("/boards/{slug}/timers")
+def list_timers(
+    slug: str,
+    status: str = Query(default="pending"),
+    all_principals: bool = Query(default=False, alias="all"),
+    ctx: AuthContext = Depends(require_api_read),
+    services: AppServices = Depends(get_services),
+) -> dict[str, Any]:
+    return {
+        "timers": timers_svc.list_timers(
+            services,
+            ctx,
+            board_slug=slug,
+            status=status,
+            all_principals=all_principals,
+        )
+    }
+
+
+@router.post("/boards/{slug}/timers", status_code=201)
+def create_timer(
+    slug: str,
+    body: CreateTimerRequest,
+    ctx: AuthContext = Depends(require_api_write),
+    services: AppServices = Depends(get_services),
+) -> dict[str, Any]:
+    return timers_svc.create_timer(
+        services,
+        ctx,
+        board_slug=slug,
+        message=body.message,
+        delay_minutes=body.delay_minutes,
+        due_at=body.due_at,
+        thread_id=body.thread_id,
+        cancel_on_reply=body.cancel_on_reply,
+    )
+
+
+@router.delete("/boards/{slug}/timers/{timer_id}")
+def cancel_timer(
+    slug: str,
+    timer_id: str,
+    ctx: AuthContext = Depends(require_api_write),
+    services: AppServices = Depends(get_services),
+) -> dict[str, Any]:
+    return timers_svc.cancel_timer(services, ctx, board_slug=slug, timer_id=timer_id)
 
 
 @router.post("/boards/{slug}/ack")

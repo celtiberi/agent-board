@@ -80,6 +80,38 @@
     </div>
   </div>
 
+  <div class="card" id="monitor-needs-input-card" data-csrf="{{ ctx.csrf_token }}" {% if not snapshot.needs_input %}style="display:none"{% endif %}>
+    <div style="display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:0.5rem">
+      <h2 style="margin:0">Needs Your Input (<span id="monitor-needs-input-count">{{ snapshot.needs_input | length }}</span>)</h2>
+      <div class="meta">Unanswered questions &amp; tasks addressed to <strong>@{{ ctx.handle }}</strong></div>
+    </div>
+    <div id="monitor-needs-input-list" style="margin-top:0.55rem">
+      {% for item in snapshot.needs_input %}
+      <div class="feed-item" style="margin-bottom:0.5rem">
+        <div class="feed-item-top">
+          <div>
+            <a href="/b/{{ item.board_slug }}/t/{{ item.thread_id }}#m-{{ item.id }}"><strong>{{ item.board_slug }}</strong> · {{ item.thread_title }} · <code>#{{ item.seq }}</code></a>
+            <span class="badge badge-{{ item.type }}">{{ item.type }}</span>
+            {% if item.priority == 'urgent' %}<span class="badge badge-blocker">URGENT</span>{% endif %}
+            by <strong>@{{ item.author_handle }}</strong>
+          </div>
+          <span class="meta">{{ item.created_at_local }}</span>
+        </div>
+        <div class="feed-preview">{{ item.body_preview }}</div>
+        <form class="needs-input-reply-form" method="post" action="/monitor/reply" style="display:flex;gap:0.4rem;margin-top:0.4rem">
+          <input type="hidden" name="csrf_token" value="{{ ctx.csrf_token }}">
+          <input type="hidden" name="board_slug" value="{{ item.board_slug }}">
+          <input type="hidden" name="thread_id" value="{{ item.thread_id }}">
+          <input type="hidden" name="reply_to_id" value="{{ item.id }}">
+          <input type="hidden" name="to_handle" value="{{ item.author_handle }}">
+          <input type="text" name="body_md" required placeholder="Quick reply to @{{ item.author_handle }}..." style="flex:1;margin:0">
+          <button type="submit" class="sm">Reply</button>
+        </form>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+
   <div class="card" id="monitor-telemetry-card" {% if not snapshot.telemetry %}style="display:none"{% endif %}>
     <div style="display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:0.5rem">
       <h2 style="margin:0">Token &amp; Cache Telemetry</h2>
@@ -422,6 +454,137 @@
 
   function formatNum(v) {
     return Number(v || 0).toLocaleString("en-US");
+  }
+
+  function renderNeedsInput(data) {
+    var card = document.getElementById("monitor-needs-input-card");
+    var list = document.getElementById("monitor-needs-input-list");
+    var countEl = document.getElementById("monitor-needs-input-count");
+    if (!card || !list) return;
+    if (document.activeElement && list.contains(document.activeElement)) {
+      return;
+    }
+    var draftInputs = list.querySelectorAll("input[name='body_md']");
+    for (var d = 0; d < draftInputs.length; d++) {
+      if (draftInputs[d].value && draftInputs[d].value.trim()) {
+        return;
+      }
+    }
+    var items = data.needs_input || [];
+    if (countEl) countEl.textContent = String(items.length);
+    if (!items.length) {
+      card.style.display = "none";
+      list.replaceChildren();
+      return;
+    }
+    card.style.display = "";
+    var csrf = card.getAttribute("data-csrf") || "";
+    var frag = document.createDocumentFragment();
+    for (var i = 0; i < items.length; i++) {
+      var item = items[i];
+      var wrap = el("div", "feed-item");
+      wrap.style.marginBottom = "0.5rem";
+
+      var top = el("div", "feed-item-top");
+      var left = document.createElement("div");
+      var link = document.createElement("a");
+      link.href = "/b/" + encodeURIComponent(item.board_slug) + "/t/" + encodeURIComponent(item.thread_id) + "#m-" + encodeURIComponent(item.id);
+      link.appendChild(el("strong", null, item.board_slug));
+      link.appendChild(document.createTextNode(" · " + item.thread_title + " · "));
+      link.appendChild(el("code", null, "#" + item.seq));
+      left.appendChild(link);
+      left.appendChild(document.createTextNode(" "));
+      left.appendChild(el("span", "badge badge-" + safeSlug(item.type), item.type));
+      if (item.priority === "urgent") {
+        left.appendChild(document.createTextNode(" "));
+        left.appendChild(el("span", "badge badge-blocker", "URGENT"));
+      }
+      left.appendChild(document.createTextNode(" by "));
+      left.appendChild(el("strong", null, "@" + item.author_handle));
+      top.appendChild(left);
+      top.appendChild(el("span", "meta", item.created_at_local));
+      wrap.appendChild(top);
+
+      wrap.appendChild(el("div", "feed-preview", item.body_preview));
+
+      var form = document.createElement("form");
+      form.className = "needs-input-reply-form";
+      form.method = "post";
+      form.action = "/monitor/reply";
+      form.style.display = "flex";
+      form.style.gap = "0.4rem";
+      form.style.marginTop = "0.4rem";
+
+      var fields = [
+        ["csrf_token", csrf],
+        ["board_slug", item.board_slug],
+        ["thread_id", item.thread_id],
+        ["reply_to_id", item.id],
+        ["to_handle", item.author_handle]
+      ];
+      for (var f = 0; f < fields.length; f++) {
+        var hid = document.createElement("input");
+        hid.type = "hidden";
+        hid.name = fields[f][0];
+        hid.value = fields[f][1];
+        form.appendChild(hid);
+      }
+      var inp = document.createElement("input");
+      inp.type = "text";
+      inp.name = "body_md";
+      inp.required = true;
+      inp.placeholder = "Quick reply to @" + item.author_handle + "...";
+      inp.style.flex = "1";
+      inp.style.margin = "0";
+      form.appendChild(inp);
+
+      var btn = el("button", "sm", "Reply");
+      btn.type = "submit";
+      form.appendChild(btn);
+
+      wrap.appendChild(form);
+      frag.appendChild(wrap);
+    }
+    list.replaceChildren(frag);
+  }
+
+  var needsInputList = document.getElementById("monitor-needs-input-list");
+  if (needsInputList) {
+    needsInputList.addEventListener("submit", async function (ev) {
+      var form = ev.target;
+      if (!form || !form.classList || !form.classList.contains("needs-input-reply-form")) return;
+      ev.preventDefault();
+      var btn = form.querySelector("button[type='submit']");
+      if (btn) btn.disabled = true;
+      try {
+        var resp = await fetch("/monitor/reply", {
+          method: "POST",
+          headers: { Accept: "application/json" },
+          body: new FormData(form)
+        });
+        if (!resp.ok) {
+          var errMsg = "HTTP " + resp.status;
+          try {
+            var errData = await resp.json();
+            if (errData && errData.error && errData.error.message) {
+              errMsg = errData.error.message;
+            }
+          } catch (_e) {}
+          pollStatus.textContent = "Reply failed: " + errMsg;
+          if (btn) btn.disabled = false;
+          return;
+        }
+        var bodyInput = form.querySelector("input[name='body_md']");
+        if (bodyInput) bodyInput.value = "";
+        if (document.activeElement && form.contains(document.activeElement)) {
+          document.activeElement.blur();
+        }
+        await refreshMonitor(false, true);
+      } catch (err) {
+        pollStatus.textContent = "Reply failed (network error)";
+        if (btn) btn.disabled = false;
+      }
+    });
   }
 
   function renderTelemetry(data) {
@@ -846,8 +1009,12 @@
     return qs;
   }
 
-  async function refreshMonitor(updateUrl) {
-    if (inflight) return;
+  var pendingRefresh = false;
+  async function refreshMonitor(updateUrl, forceQueue) {
+    if (inflight) {
+      if (forceQueue) pendingRefresh = true;
+      return;
+    }
     inflight = true;
     var qs = buildParams();
     if (updateUrl && window.history && window.history.replaceState) {
@@ -864,6 +1031,7 @@
       syncSelectOptions(boardSel, data.boards || [], "All active boards", "");
       syncSelectOptions(agentSel, data.handles || [], "All principals", "@");
       renderKpis(data);
+      renderNeedsInput(data);
       renderTelemetry(data);
       renderChart(data);
       renderMatrix(data);
@@ -876,6 +1044,10 @@
       pollStatus.textContent = "poll paused (network error)";
     } finally {
       inflight = false;
+      if (pendingRefresh) {
+        pendingRefresh = false;
+        refreshMonitor(false, false);
+      }
     }
   }
 

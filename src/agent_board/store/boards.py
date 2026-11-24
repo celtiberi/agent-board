@@ -251,11 +251,13 @@ def get_thread_by_id(conn: sqlite3.Connection, thread_id: str) -> sqlite3.Row | 
     return conn.execute(
         """
         SELECT t.*, p.handle AS created_by_handle,
+               hp.handle AS handoff_updated_by_handle,
                (SELECT COUNT(DISTINCT m.root_id) FROM messages m WHERE m.thread_id = t.id) AS message_count,
                COALESCE((SELECT MAX(m.seq) FROM messages m WHERE m.thread_id = t.id), 0) AS last_seq,
                (SELECT MAX(m.created_at) FROM messages m WHERE m.thread_id = t.id) AS last_activity_at
         FROM threads t
         JOIN principals p ON p.id = t.created_by
+        LEFT JOIN principals hp ON hp.id = t.handoff_updated_by
         WHERE t.id = ?
         """,
         (thread_id,),
@@ -266,11 +268,13 @@ def get_open_thread_by_title(conn: sqlite3.Connection, board_id: str, title: str
     return conn.execute(
         """
         SELECT t.*, p.handle AS created_by_handle,
+               hp.handle AS handoff_updated_by_handle,
                (SELECT COUNT(DISTINCT m.root_id) FROM messages m WHERE m.thread_id = t.id) AS message_count,
                COALESCE((SELECT MAX(m.seq) FROM messages m WHERE m.thread_id = t.id), 0) AS last_seq,
                (SELECT MAX(m.created_at) FROM messages m WHERE m.thread_id = t.id) AS last_activity_at
         FROM threads t
         JOIN principals p ON p.id = t.created_by
+        LEFT JOIN principals hp ON hp.id = t.handoff_updated_by
         WHERE t.board_id = ? AND LOWER(t.title) = LOWER(?) AND t.closed_at IS NULL
         LIMIT 1
         """,
@@ -282,11 +286,13 @@ def get_thread_by_title(conn: sqlite3.Connection, board_id: str, title: str) -> 
     return conn.execute(
         """
         SELECT t.*, p.handle AS created_by_handle,
+               hp.handle AS handoff_updated_by_handle,
                (SELECT COUNT(DISTINCT m.root_id) FROM messages m WHERE m.thread_id = t.id) AS message_count,
                COALESCE((SELECT MAX(m.seq) FROM messages m WHERE m.thread_id = t.id), 0) AS last_seq,
                (SELECT MAX(m.created_at) FROM messages m WHERE m.thread_id = t.id) AS last_activity_at
         FROM threads t
         JOIN principals p ON p.id = t.created_by
+        LEFT JOIN principals hp ON hp.id = t.handoff_updated_by
         WHERE t.board_id = ? AND LOWER(t.title) = LOWER(?)
         ORDER BY t.created_at DESC
         LIMIT 1
@@ -304,11 +310,13 @@ def list_threads(conn: sqlite3.Connection, board_id: str, *, state: str = "open"
     return conn.execute(
         f"""
         SELECT t.*, p.handle AS created_by_handle,
+               hp.handle AS handoff_updated_by_handle,
                (SELECT COUNT(DISTINCT m.root_id) FROM messages m WHERE m.thread_id = t.id) AS message_count,
                COALESCE((SELECT MAX(m.seq) FROM messages m WHERE m.thread_id = t.id), 0) AS last_seq,
                (SELECT MAX(m.created_at) FROM messages m WHERE m.thread_id = t.id) AS last_activity_at
         FROM threads t
         JOIN principals p ON p.id = t.created_by
+        LEFT JOIN principals hp ON hp.id = t.handoff_updated_by
         WHERE t.board_id = ? {where_state}
         ORDER BY COALESCE(last_activity_at, t.created_at) DESC, t.created_at DESC
         """,
@@ -318,3 +326,40 @@ def list_threads(conn: sqlite3.Connection, board_id: str, *, state: str = "open"
 
 def set_thread_closed(conn: sqlite3.Connection, thread_id: str, closed_at: str | None) -> None:
     conn.execute("UPDATE threads SET closed_at = ? WHERE id = ?", (closed_at, thread_id))
+
+
+def set_thread_handoff(
+    conn: sqlite3.Connection,
+    *,
+    thread_id: str,
+    handoff_md: str | None,
+    updated_by: str | None,
+    updated_at: str | None,
+) -> None:
+    conn.execute(
+        """
+        UPDATE threads
+        SET handoff_md = ?, handoff_updated_by = ?, handoff_updated_at = ?
+        WHERE id = ?
+        """,
+        (handoff_md, updated_by, updated_at, thread_id),
+    )
+
+
+def list_thread_handoffs(conn: sqlite3.Connection, board_id: str, *, limit: int = 15) -> list[sqlite3.Row]:
+    return conn.execute(
+        """
+        SELECT t.id AS thread_id, t.title AS thread_title,
+               t.handoff_md, t.handoff_updated_at,
+               hp.handle AS updated_by_handle
+        FROM threads t
+        LEFT JOIN principals hp ON hp.id = t.handoff_updated_by
+        WHERE t.board_id = ?
+          AND t.closed_at IS NULL
+          AND t.handoff_md IS NOT NULL
+          AND TRIM(t.handoff_md) != ''
+        ORDER BY t.handoff_updated_at DESC, t.created_at DESC
+        LIMIT ?
+        """,
+        (board_id, limit),
+    ).fetchall()

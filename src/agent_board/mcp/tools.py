@@ -23,6 +23,7 @@ from agent_board.services import delivery as delivery_svc
 from agent_board.services import issues as issues_svc
 from agent_board.services import messages as messages_svc
 from agent_board.services import search as search_svc
+from agent_board.services import timers as timers_svc
 from agent_board.services.auth import authenticate_bearer
 from agent_board.services.context import AppServices, AuthContext
 
@@ -36,6 +37,9 @@ _WRITE_METHODS = frozenset(
         "edit_message",
         "ack",
         "set_dnd",
+        "set_timer",
+        "cancel_timer",
+        "set_thread_handoff",
         "record_decision",
         "supersede_decision",
         "open_issue",
@@ -493,6 +497,74 @@ def build_mcp_server(services: AppServices) -> tuple[MCPServer, ASGIApp]:
             )
 
         return _run_tool(services, is_write=True, fn=_do)
+
+    @mcp.tool(
+        description=(
+            "Schedule a durable follow-up timer that posts a targeted reminder and wakes you when due. "
+            "Optionally set cancel_on_reply=True with thread_id to auto-cancel if someone else replies first."
+        )
+    )
+    def set_timer(
+        board: str,
+        message: str,
+        delay_minutes: int | None = None,
+        due_at: str | None = None,
+        thread_id: str | None = None,
+        cancel_on_reply: bool = False,
+    ) -> dict[str, Any]:
+        return _run_tool(
+            services,
+            is_write=True,
+            fn=lambda ctx: timers_svc.create_timer(
+                services,
+                ctx,
+                board_slug=board,
+                message=message,
+                delay_minutes=delay_minutes,
+                due_at=due_at,
+                thread_id=thread_id,
+                cancel_on_reply=cancel_on_reply,
+            ),
+        )
+
+    @mcp.tool(description="List your durable follow-up timers on a board (status: pending, fired, cancelled, or all).")
+    def list_timers(board: str, status: str = "pending") -> dict[str, Any]:
+        return _run_tool(
+            services,
+            is_write=False,
+            fn=lambda ctx: {"timers": timers_svc.list_timers(services, ctx, board_slug=board, status=status)},
+        )
+
+    @mcp.tool(description="Cancel a pending follow-up timer by timer_id.")
+    def cancel_timer(board: str, timer_id: str) -> dict[str, Any]:
+        return _run_tool(
+            services,
+            is_write=True,
+            fn=lambda ctx: timers_svc.cancel_timer(services, ctx, board_slug=board, timer_id=timer_id),
+        )
+
+    @mcp.tool(
+        description=(
+            "Set or clear a pinned thread progress/handoff summary surfaced in get_brief "
+            "so agents can /compact without losing in-flight task state."
+        )
+    )
+    def set_thread_handoff(
+        board: str,
+        thread_id: str,
+        handoff_md: str | None = None,
+    ) -> dict[str, Any]:
+        return _run_tool(
+            services,
+            is_write=True,
+            fn=lambda ctx: boards_svc.set_thread_handoff(
+                services,
+                ctx,
+                board_slug=board,
+                thread_id=thread_id,
+                handoff_md=handoff_md,
+            ),
+        )
 
     mcp_asgi = mcp.streamable_http_app(
         streamable_http_path="/",

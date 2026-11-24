@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hmac
+
 from fastapi import Header, Request
 
 from agent_board.errors import AuthError, PermissionDeniedError
@@ -39,7 +41,11 @@ def _authenticate_api_request(
         if session_cookie:
             ctx = authenticate_session(services, session_cookie, ip=ip)
             if ctx is not None:
-                if is_write and (not x_csrf_token or x_csrf_token != ctx.csrf_token):
+                if is_write and (
+                    not x_csrf_token
+                    or not ctx.csrf_token
+                    or not hmac.compare_digest(x_csrf_token, ctx.csrf_token)
+                ):
                     raise PermissionDeniedError("Invalid or missing CSRF token", code="csrf_invalid")
                 limiter_key = f"sess:{ctx.principal_id}"
 

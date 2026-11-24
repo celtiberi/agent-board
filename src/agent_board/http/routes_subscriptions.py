@@ -93,10 +93,12 @@ async def test_subscription(
     ctx: AuthContext = Depends(require_api_write),
     services: AppServices = Depends(get_services),
 ) -> dict[str, Any]:
+    if not ctx.has_server_owner_privilege and ctx.max_role == "readonly":
+        raise PermissionDeniedError("Readonly tokens cannot manage subscriptions")
     sub = delivery_store.get_subscription_by_id(services.db.read_conn(), sub_id)
     if sub is None:
         raise NotFoundError(f"Subscription '{sub_id}' not found")
-    if sub["principal_id"] != ctx.principal_id and not ctx.is_server_owner:
+    if sub["principal_id"] != ctx.principal_id and not ctx.has_server_owner_privilege:
         raise PermissionDeniedError("Cannot test another principal's subscription")
 
     worker = services.nudge_worker

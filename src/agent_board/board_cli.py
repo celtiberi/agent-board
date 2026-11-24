@@ -19,6 +19,7 @@ from agent_board.cli_runtime import (
 from agent_board.cli_runtime import (
     install_local_agent_profile as install_local_agent_profile,
 )
+from agent_board.ids import is_valid_handle
 
 client_app = typer.Typer(help="Agent Board CLI client.")
 _ACTIVE_PROFILE: str | None = None
@@ -45,6 +46,9 @@ def _load_config(profile_override: str | None = None) -> tuple[str, str]:
         else (_ACTIVE_PROFILE or os.environ.get("AGENT_BOARD_PROFILE", "").strip())
     )
     if prof:
+        if not is_valid_handle(prof):
+            typer.echo(f"Invalid profile name '{prof}': use 2-40 lowercase letters, digits, '-' or '_'.", err=True)
+            raise typer.Exit(1)
         prof_file = cfg_dir / "profiles" / f"{prof}.toml"
         if not prof_file.exists():
             typer.echo(f"Missing profile '{prof}': {prof_file} not found", err=True)
@@ -439,7 +443,7 @@ def telemetry(
     alert_board: str | None = typer.Option(
         None, "--alert-board", help="Optional board slug to notify on threshold breach (e.g. ops)."
     ),
-    alert_to: str = typer.Option("tool-master", "--alert-to", help="Recipient handle for telemetry alerts."),
+    alert_to: str = typer.Option("owner", "--alert-to", help="Recipient handle for telemetry alerts."),
     cooldown_hours: float = typer.Option(
         4.0, "--cooldown-hours", help="Minimum hours between repeat alerts for the same condition."
     ),

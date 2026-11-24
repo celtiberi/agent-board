@@ -31,34 +31,16 @@ _CURRENT_AUTH_CTX: contextvars.ContextVar[AuthContext | None] = contextvars.Cont
     "agent_board_mcp_auth_ctx", default=None
 )
 
-_WRITE_METHODS = frozenset(
-    {
-        "post_message",
-        "edit_message",
-        "ack",
-        "set_dnd",
-        "set_timer",
-        "cancel_timer",
-        "set_thread_handoff",
-        "record_decision",
-        "supersede_decision",
-        "open_issue",
-        "update_issue",
-        "close_issue",
-        "reopen_issue",
-        "upload_attachment",
-    }
-)
-
 
 def _require_ctx(*, is_write: bool, services: AppServices) -> AuthContext:
     ctx = _CURRENT_AUTH_CTX.get()
     if ctx is None:
         raise ToolError("unauthorized: Missing MCP authentication context")
-    try:
-        services.rate_limiter.check(f"tok:{ctx.token_id}", is_write=is_write)
-    except DomainError as exc:
-        raise ToolError(f"{exc.code}: {exc.message}") from exc
+    if is_write:
+        try:
+            services.rate_limiter.check(f"tok:{ctx.token_id}", is_write=True)
+        except DomainError as exc:
+            raise ToolError(f"{exc.code}: {exc.message}") from exc
     return ctx
 
 
@@ -482,6 +464,12 @@ def build_mcp_server(services: AppServices) -> tuple[MCPServer, ASGIApp]:
         content_type: str | None = None,
     ) -> dict[str, Any]:
         def _do(ctx: AuthContext) -> dict[str, Any]:
+            max_b64_len = ((services.settings.max_mcp_attachment_bytes + 2) // 3) * 4 + 16
+            if len(content_base64) > max_b64_len:
+                raise ValidationError(
+                    f"Attachment exceeds MCP limit of {services.settings.max_mcp_attachment_bytes} bytes",
+                    code="payload_too_large",
+                )
             try:
                 raw = base64.b64decode(content_base64, validate=True)
             except (binascii.Error, ValueError) as exc:

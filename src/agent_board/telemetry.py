@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import socket
+import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -112,6 +114,15 @@ def _finalize_bucket(bucket: dict[str, Any]) -> dict[str, Any]:
     return {**bucket, "hit_rate_5h": hit_rate, "idle_wake_miss_rate_5h": idle_miss_rate}
 
 
+def _safe_int(value: Any) -> int:
+    if value is None or isinstance(value, bool):
+        return 0
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
 def _parse_transcript_metrics(path: Path, *, now: datetime) -> dict[str, Any]:
     """Parse one transcript.jsonl chronologically so resumed turns/gaps stay exact across windows."""
     stats = _empty_bucket()
@@ -142,6 +153,8 @@ def _parse_transcript_metrics(path: Path, *, now: datetime) -> dict[str, Any]:
                 obj = json.loads(raw_line)
             except json.JSONDecodeError:
                 continue
+            if not isinstance(obj, dict):
+                continue
 
             ts_raw = obj.get("created_at")
             if not isinstance(ts_raw, str) or not ts_raw:
@@ -170,9 +183,9 @@ def _parse_transcript_metrics(path: Path, *, now: datetime) -> dict[str, Any]:
 
             if step_type == "CHECKPOINT":
                 saw_checkpoint = True
-                inp = int(obj.get("input_tokens") or 0)
-                cache_r = int(obj.get("cache_read_tokens") or 0)
-                out = int(obj.get("output_tokens") or 0)
+                inp = _safe_int(obj.get("input_tokens"))
+                cache_r = _safe_int(obj.get("cache_read_tokens"))
+                out = _safe_int(obj.get("output_tokens"))
                 if step_dt >= cutoff_24h:
                     stats["uncached_24h"] += inp
                 if step_dt >= cutoff_5h:
@@ -190,9 +203,9 @@ def _parse_transcript_metrics(path: Path, *, now: datetime) -> dict[str, Any]:
             if step_type != "PLANNER_RESPONSE":
                 continue
 
-            inp = int(obj.get("input_tokens") or 0)
-            cache_r = int(obj.get("cache_read_tokens") or 0)
-            out = int(obj.get("output_tokens") or 0)
+            inp = _safe_int(obj.get("input_tokens"))
+            cache_r = _safe_int(obj.get("cache_read_tokens"))
+            out = _safe_int(obj.get("output_tokens"))
             model = str(obj.get("model") or "") or None
             has_tools = bool(obj.get("tool_calls"))
             ctx_tokens = inp + cache_r
@@ -490,62 +503,80 @@ def dispatch_telemetry_alerts(
 
     current = now or utc_now()
     cooldown_s = max(0.0, cooldown_hours * 3600.0)
-    last_sent: dict[str, str] = {}
-    if state_path.exists():
-        try:
-            loaded = json.loads(state_path.read_text(encoding="utf-8"))
-            if isinstance(loaded, dict):
-                last_sent = {str(k): str(v) for k, v in loaded.items()}
-        except Exception:
-            last_sent = {}
-
-    due: list[dict[str, Any]] = []
-    for a in alerts:
-        key = str(a.get("key") or "")
-        prev_iso = last_sent.get(key)
-        if prev_iso and cooldown_s > 0:
-            try:
-                if (current - iso_to_dt(prev_iso)).total_seconds() < cooldown_s:
-                    continue
-            except Exception:
-                pass
-        due.append(a)
-
-    if not due:
-        return []
-
-    clean_to = alert_to.strip().lstrip("@").lower()
-    g = snapshot.get("global", {})
-    lines = [
-        f"@{clean_to} Zero-LLM telemetry alert from `{snapshot.get('host_id', 'workstation')}` "
-        f"(5h global uncached: **{int(g.get('uncached_5h', 0)):,}**, "
-        f"hit rate: **{g.get('hit_rate_5h')}%**):",
-        "",
-    ]
-    for a in due:
-        lines.append(f"- **[{str(a['severity']).upper()}]** {a['message']}")
-    warn_k = int((snapshot.get("thresholds") or {}).get("context_warn_tokens", 150_000)) // 1000
-    lines.extend(["", f"Run `/compact` on any oversized tab above {warn_k}k context tokens, or check `/monitor`."])
-
-    resp = client.post(
-        f"/boards/{alert_board.strip()}/messages",
-        json={
-            "thread_title": "token-telemetry-alerts",
-            "type": "note",
-            "to": [clean_to],
-            "body_md": "\n".join(lines),
-        },
-        headers={"Idempotency-Key": f"telemetry-{snapshot.get('collected_at', '')}-{len(due)}"},
-    )
-    if resp.status_code >= 400:
-        raise RuntimeError(f"Failed posting telemetry alert ({resp.status_code}): {resp.text}")
-
-    now_iso = dt_to_iso(current)
-    for a in due:
-        last_sent[str(a["key"])] = now_iso
     state_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = state_path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(last_sent, indent=2) + "\n", encoding="utf-8")
-    os.chmod(tmp, 0o600)
-    tmp.replace(state_path)
-    return due
+    lock_path = state_path.with_name(f".{state_path.name}.lock")
+    with lock_path.open("a+", encoding="utf-8") as lock_fh:
+        fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX)
+        try:
+            last_sent: dict[str, str] = {}
+            if state_path.exists():
+                try:
+                    loaded = json.loads(state_path.read_text(encoding="utf-8"))
+                    if isinstance(loaded, dict):
+                        last_sent = {str(k): str(v) for k, v in loaded.items()}
+                except Exception:
+                    last_sent = {}
+
+            due: list[dict[str, Any]] = []
+            for a in alerts:
+                key = str(a.get("key") or "")
+                prev_iso = last_sent.get(key)
+                if prev_iso and cooldown_s > 0:
+                    try:
+                        if (current - iso_to_dt(prev_iso)).total_seconds() < cooldown_s:
+                            continue
+                    except Exception:
+                        pass
+                due.append(a)
+
+            if not due:
+                return []
+
+            clean_to = alert_to.strip().lstrip("@").lower()
+            g = snapshot.get("global", {})
+            hit_rate = g.get("hit_rate_5h")
+            hit_rate_str = f"{hit_rate}%" if hit_rate is not None else "—"
+            lines = [
+                f"@{clean_to} Zero-LLM telemetry alert from `{snapshot.get('host_id', 'workstation')}` "
+                f"(5h global uncached: **{int(g.get('uncached_5h', 0)):,}**, "
+                f"hit rate: **{hit_rate_str}**):",
+                "",
+            ]
+            for a in due:
+                lines.append(f"- **[{str(a['severity']).upper()}]** {a['message']}")
+            warn_k = int((snapshot.get("thresholds") or {}).get("context_warn_tokens", 150_000)) // 1000
+            lines.extend(
+                ["", f"Run `/compact` on any oversized tab above {warn_k}k context tokens, or check `/monitor`."]
+            )
+
+            resp = client.post(
+                f"/boards/{alert_board.strip()}/messages",
+                json={
+                    "thread_title": "token-telemetry-alerts",
+                    "type": "note",
+                    "to": [clean_to],
+                    "body_md": "\n".join(lines),
+                },
+                headers={"Idempotency-Key": f"telemetry-{snapshot.get('collected_at', '')}-{len(due)}"},
+            )
+            if resp.status_code >= 400:
+                raise RuntimeError(f"Failed posting telemetry alert ({resp.status_code}): {resp.text}")
+
+            now_iso = dt_to_iso(current)
+            for a in due:
+                last_sent[str(a["key"])] = now_iso
+            fd, tmp_name = tempfile.mkstemp(dir=str(state_path.parent), prefix=f".{state_path.name}.", suffix=".tmp")
+            try:
+                os.chmod(tmp_name, 0o600)
+                with os.fdopen(fd, "w", encoding="utf-8") as tmp_fh:
+                    tmp_fh.write(json.dumps(last_sent, indent=2) + "\n")
+                os.replace(tmp_name, state_path)
+            except Exception:
+                try:
+                    os.unlink(tmp_name)
+                except OSError:
+                    pass
+                raise
+            return due
+        finally:
+            fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)

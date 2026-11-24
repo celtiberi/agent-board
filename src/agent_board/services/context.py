@@ -36,6 +36,13 @@ class AuthContext:
     csrf_token: str | None = None
     ip: str | None = None
 
+    @property
+    def has_server_owner_privilege(self) -> bool:
+        """True only when caller is system or a server owner with unrestricted owner scope."""
+        return self.auth_kind == "system" or (
+            self.is_server_owner and self.max_role == "owner" and "*" in self.board_scope
+        )
+
     def allows_board(self, slug: str) -> bool:
         return "*" in self.board_scope or slug in self.board_scope
 

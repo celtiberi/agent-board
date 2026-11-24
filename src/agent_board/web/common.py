@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hmac
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote_plus
@@ -46,7 +47,7 @@ def _session_ctx(request: Request) -> AuthContext | None:
 
 
 def _require_csrf(ctx: AuthContext, submitted_token: str | None) -> None:
-    if not submitted_token or submitted_token != ctx.csrf_token:
+    if not submitted_token or not ctx.csrf_token or not hmac.compare_digest(submitted_token, ctx.csrf_token):
         raise PermissionDeniedError("Invalid or missing CSRF token", code="csrf_invalid")
 
 

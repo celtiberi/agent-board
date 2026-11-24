@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import sqlite3
 from typing import Any
 
 from agent_board.errors import ValidationError
@@ -16,6 +17,7 @@ from agent_board.store import search as search_store
 _QUERY_TOKEN_RE = re.compile(r'"([^"]*)"|(\S+)')
 _SIMPLE_PREFIX_RE = re.compile(r"^[A-Za-z0-9_]+\*$")
 _SIMPLE_WORD_RE = re.compile(r"^[A-Za-z0-9_]+$")
+_FTS5_RESERVED = frozenset({"AND", "OR", "NOT", "NEAR"})
 
 
 def build_fts_match_expr(raw_query: str) -> str:
@@ -30,7 +32,10 @@ def build_fts_match_expr(raw_query: str) -> str:
         elif word:
             if word == "OR":
                 tokens.append("OR")
-            elif _SIMPLE_PREFIX_RE.match(word) or _SIMPLE_WORD_RE.match(word):
+            elif (
+                (_SIMPLE_PREFIX_RE.match(word) or _SIMPLE_WORD_RE.match(word))
+                and word.rstrip("*").upper() not in _FTS5_RESERVED
+            ):
                 tokens.append(word)
             else:
                 has_star = word.endswith("*") and len(word) > 1
@@ -106,16 +111,19 @@ def search(
 
     hits: list[dict[str, Any]] = []
 
-    msg_rows = search_store.search_messages_fts(
-        conn,
-        match_expr=match_expr,
-        board_ids=board_ids,
-        types=types,
-        author_id=author_id,
-        date_from=date_from,
-        date_to=date_to,
-        limit=limit,
-    )
+    try:
+        msg_rows = search_store.search_messages_fts(
+            conn,
+            match_expr=match_expr,
+            board_ids=board_ids,
+            types=types,
+            author_id=author_id,
+            date_from=date_from,
+            date_to=date_to,
+            limit=limit,
+        )
+    except sqlite3.OperationalError as exc:
+        raise ValidationError(f"Invalid search query syntax: {exc}") from exc
     for r in msg_rows:
         hits.append(
             {
@@ -136,14 +144,17 @@ def search(
 
     include_decisions = (not types or "decision" in types) and author_id is None
     if include_decisions:
-        dec_rows = search_store.search_decisions_fts(
-            conn,
-            match_expr=match_expr,
-            board_ids=board_ids,
-            date_from=date_from,
-            date_to=date_to,
-            limit=limit,
-        )
+        try:
+            dec_rows = search_store.search_decisions_fts(
+                conn,
+                match_expr=match_expr,
+                board_ids=board_ids,
+                date_from=date_from,
+                date_to=date_to,
+                limit=limit,
+            )
+        except sqlite3.OperationalError as exc:
+            raise ValidationError(f"Invalid search query syntax: {exc}") from exc
         for r in dec_rows:
             ref = f"D-{r['number']}"
             hits.append(
@@ -165,14 +176,17 @@ def search(
 
     include_issues = (not types or "issue" in types) and author_id is None
     if include_issues:
-        iss_rows = search_store.search_issues_fts(
-            conn,
-            match_expr=match_expr,
-            board_ids=board_ids,
-            date_from=date_from,
-            date_to=date_to,
-            limit=limit,
-        )
+        try:
+            iss_rows = search_store.search_issues_fts(
+                conn,
+                match_expr=match_expr,
+                board_ids=board_ids,
+                date_from=date_from,
+                date_to=date_to,
+                limit=limit,
+            )
+        except sqlite3.OperationalError as exc:
+            raise ValidationError(f"Invalid search query syntax: {exc}") from exc
         for r in iss_rows:
             ref = f"I-{r['number']}"
             hits.append(

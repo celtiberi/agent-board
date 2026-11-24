@@ -748,6 +748,8 @@ class AdminBotProcessor:
         )
         return "\n".join(lines)
 
+    MAX_ACTIONS_PER_MESSAGE = 5
+
     def _execute_action(
         self,
         action: dict[str, Any],
@@ -757,6 +759,7 @@ class AdminBotProcessor:
         principals_by_handle: dict[str, dict[str, Any]],
         memberships: list[dict[str, Any]],
         caller_boards: set[str],
+        caller_writable_boards: set[str],
         newly_created_boards: set[str],
         current_board: str = "",
     ) -> str:
@@ -916,6 +919,7 @@ class AdminBotProcessor:
             self.board.create_board(slug=slug, name=name, purpose=purpose)
             newly_created_boards.add(slug)
             caller_boards.add(slug)
+            caller_writable_boards.add(slug)
 
             raw_members = action.get("members") or []
             requested_handles = [_clean_handle(str(m)) for m in raw_members if _clean_handle(str(m))]
@@ -951,14 +955,29 @@ class AdminBotProcessor:
             target = principals_by_handle.get(target_h)
             if target is None or target.get("kind") == "system" or target.get("disabled_at") is not None:
                 return f"Principal `{target_h}` not found or disabled."
-            if tier != "owner" and slug not in caller_boards and slug not in newly_created_boards:
-                return (
-                    f"Refused: you can only add members to newly created boards or boards you belong to "
-                    f"(`{slug}` denied)."
+            if tier != "owner":
+                if target_h == self.bot_handle or bool(target.get("is_server_owner")):
+                    return f"Refused: cannot modify `{target_h}` via bot."
+                if slug not in caller_writable_boards and slug not in newly_created_boards:
+                    return (
+                        f"Refused: you can only add members to newly created boards or boards where you have "
+                        f"write access (`{slug}` denied)."
+                    )
+                existing_member = any(
+                    str(m.get("board_slug", "")).lower() == slug
+                    and str(m.get("principal_handle", "")).lower() == target_h
+                    for m in memberships
                 )
+                if existing_member:
+                    return (
+                        f"Refused: `{target_h}` is already a member of `{slug}`; "
+                        "only a server owner can change existing membership roles."
+                    )
             self.board.set_membership(board_slug=slug, principal_handle=target_h, role=role)
             if target_h == author_handle:
                 caller_boards.add(slug)
+                if role in ("agent", "owner"):
+                    caller_writable_boards.add(slug)
             return f"Added `{target_h}` to `{slug}` as `{role}` (active token scope synced)."
 
         if kind == "remove_membership":
@@ -1004,23 +1023,32 @@ class AdminBotProcessor:
             if tier not in ("owner", "trusted"):
                 return "Refused: enabling webhooks requires `dev` tag or server owner permissions."
             subs = self.board.list_subscriptions()
+            shared_principals = {author_handle}
+            if tier != "owner":
+                for m in memberships:
+                    if str(m.get("board_slug", "")).lower() in caller_boards:
+                        shared_principals.add(str(m.get("principal_handle", "")).lower())
             sub_id = str(action.get("subscription_id", "")).strip()
             if sub_id:
                 match = next((s for s in subs if s["id"] == sub_id), None)
                 if match is None:
                     return f"Subscription `{sub_id}` not found."
-                if (
-                    tier != "owner"
-                    and match.get("active", True)
-                    and str(match.get("principal_handle", "")).lower() != author_handle
-                ):
+                sub_owner = str(match.get("principal_handle", "")).lower()
+                if tier != "owner" and sub_owner not in shared_principals:
+                    return f"Refused: `{sub_id}` belongs to a principal outside your boards."
+                if tier != "owner" and match.get("active", True) and sub_owner != author_handle:
                     return f"Refused: `{sub_id}` is already active and belongs to another principal."
                 self.board.enable_subscription(sub_id)
                 return f"Re-enabled subscription `{sub_id}` (`{match['principal_handle']}`)."
 
-            disabled = [s for s in subs if not s.get("active", True)]
+            disabled = [
+                s
+                for s in subs
+                if not s.get("active", True)
+                and (tier == "owner" or str(s.get("principal_handle", "")).lower() in shared_principals)
+            ]
             if not disabled:
-                return "All webhook subscriptions are already active."
+                return "All accessible webhook subscriptions are already active."
             healed = []
             for s in disabled:
                 self.board.enable_subscription(s["id"])
@@ -1059,6 +1087,12 @@ class AdminBotProcessor:
             for m in memberships
             if str(m["principal_handle"]).lower() == author
         }
+        caller_writable_boards = {
+            str(m["board_slug"]).lower()
+            for m in memberships
+            if str(m["principal_handle"]).lower() == author
+            and str(m.get("role", "")).lower() in ("agent", "owner")
+        }
 
         actions = parse_deterministic_commands(addressed, bot_handle=self.bot_handle)
         if not actions and self.ollama is not None:
@@ -1086,6 +1120,11 @@ class AdminBotProcessor:
         if not actions:
             actions = [{"action": "unknown"}]
 
+        truncated_count = 0
+        if len(actions) > self.MAX_ACTIONS_PER_MESSAGE:
+            truncated_count = len(actions) - self.MAX_ACTIONS_PER_MESSAGE
+            actions = actions[: self.MAX_ACTIONS_PER_MESSAGE]
+
         newly_created: set[str] = set()
         results: list[str] = []
         for act in actions:
@@ -1098,12 +1137,17 @@ class AdminBotProcessor:
                         principals_by_handle=principals_by_handle,
                         memberships=memberships,
                         caller_boards=caller_boards,
+                        caller_writable_boards=caller_writable_boards,
                         newly_created_boards=newly_created,
                         current_board=board_slug,
                     )
                 )
             except Exception as exc:
                 results.append(f"Error executing `{act.get('action', 'command')}`: {exc}")
+        if truncated_count > 0:
+            results.append(
+                f"Skipped {truncated_count} extra action(s) (max {self.MAX_ACTIONS_PER_MESSAGE} per message)."
+            )
 
         posted = self._reply(board_slug, msg, "\n".join(results))
         return int(posted.get("seq", 0))
@@ -1119,18 +1163,16 @@ class AdminBotProcessor:
         if not messages:
             return 0
         handled = 0
-        max_seq = 0
+        max_read_seq = 0
         for m in messages:
             seq = int(m.get("seq", 0))
-            if seq > max_seq:
-                max_seq = seq
+            if seq > max_read_seq:
+                max_read_seq = seq
             posted_seq = self._process_message(board_slug, m)
             if posted_seq is not None:
                 handled += 1
-                if posted_seq > max_seq:
-                    max_seq = posted_seq
-        if max_seq > 0:
-            self.board.ack(board_slug, max_seq)
+        if max_read_seq > 0:
+            self.board.ack(board_slug, max_read_seq)
         return handled
 
     def heal_own_subscription(self) -> None:

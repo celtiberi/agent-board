@@ -12,6 +12,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import tomllib
 from http import HTTPStatus
@@ -21,7 +22,6 @@ from typing import Any
 
 import httpx
 
-from agent_board.constants import ACTIONABLE_MESSAGE_TYPES_SET
 from agent_board.nudger.signing import verify_nudge_signature
 
 logging.basicConfig(
@@ -187,8 +187,7 @@ class ListenerState:
 
     def _save_locked(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.path.with_suffix(".tmp")
-        tmp.write_text(
+        payload = (
             json.dumps(
                 {
                     "last_dispatched_seq": self.last_dispatched_seq,
@@ -196,10 +195,19 @@ class ListenerState:
                 },
                 indent=2,
             )
-            + "\n",
-            encoding="utf-8",
+            + "\n"
         )
-        tmp.replace(self.path)
+        fd, tmp_name = tempfile.mkstemp(dir=str(self.path.parent), prefix=".state.", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(payload)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.chmod(tmp_name, 0o600)
+            os.replace(tmp_name, self.path)
+        finally:
+            if os.path.exists(tmp_name):
+                os.unlink(tmp_name)
 
     @staticmethod
     def _route_key(board: str, handle: str) -> str:
@@ -389,7 +397,11 @@ def _dispatch_to_agentapi(state: ListenerState, item: dict[str, Any]) -> None:
         urgent=is_urgent,
     )
 
-    cmd = [agentapi_bin, "send-message", f"--title={title}", conv_id, prompt]
+    if not conv_id or conv_id.startswith("-"):
+        state.release_inflight(board, handle, latest_seq, nudge_id)
+        logger.warning("Refusing invalid conversation_id %r for @%s", conv_id, handle)
+        return
+    cmd = [agentapi_bin, "send-message", f"--title={title}", "--", conv_id, prompt]
     logger.info("Dispatching send-message to %s (@%s) for %s #%s", conv_id, handle, board, latest_seq)
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60, check=False)
     if proc.returncode == 0:
@@ -450,7 +462,9 @@ def _recover_one_board(
     if unread_count <= 0 or latest_seq <= state.get_last_seq(slug, handle):
         return
 
-    msg_resp = client.get(f"/boards/{slug}/messages")
+    last_dispatched = state.get_last_seq(slug, handle)
+    params = {"since_seq": last_dispatched, "limit": 200} if last_dispatched > 0 else {"limit": 200}
+    msg_resp = client.get(f"/boards/{slug}/messages", params=params)
     if msg_resp.status_code != 200:
         return
     messages = msg_resp.json().get("messages", [])
@@ -467,7 +481,7 @@ def _recover_one_board(
             if handle in to_list:
                 matching.append(m)
         else:
-            if not mentions_only and mtype in allowed_types:
+            if not mentions_only and (not allowed_types or mtype in allowed_types):
                 matching.append(m)
     if not matching:
         return
@@ -550,10 +564,8 @@ def _recover_missed_activity(
         flt = sub_meta.get("filter") if isinstance(sub_meta.get("filter"), dict) else {}
         mentions_only = bool(flt.get("mentions_only", False))
         raw_types = flt.get("types")
-        allowed_types = (
-            {str(t) for t in raw_types}
-            if isinstance(raw_types, list) and raw_types
-            else ACTIONABLE_MESSAGE_TYPES_SET
+        allowed_types: set[str] | frozenset[str] = (
+            {str(t) for t in raw_types} if isinstance(raw_types, list) and raw_types else frozenset()
         )
 
         agent_url, agent_token = _load_agent_credentials(handle, board_cfg)
@@ -634,7 +646,15 @@ def _make_handler(
     expected_auth = f"Bearer {str(hook_cfg['bearer_token']).strip()}"
     hmac_secret = str(hook_cfg["hmac_secret"])
 
+    req_sem = threading.BoundedSemaphore(32)
+
     class WebhookHandler(BaseHTTPRequestHandler):
+        timeout = 5.0
+
+        def setup(self) -> None:
+            super().setup()
+            self.request.settimeout(self.timeout)
+
         def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
             logger.info("%s - %s", self.client_address[0], format % args)
 
@@ -653,8 +673,23 @@ def _make_handler(
             self._send_json(HTTPStatus.NOT_FOUND, {"error": "not_found"})
 
         def do_POST(self) -> None:  # noqa: N802
+            if not req_sem.acquire(blocking=False):
+                self._send_json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "server_busy"})
+                return
+            try:
+                self._handle_post()
+            finally:
+                req_sem.release()
+
+        def _handle_post(self) -> None:
             if self.path.split("?", 1)[0] != "/webhook":
                 self._send_json(HTTPStatus.NOT_FOUND, {"error": "not_found"})
+                return
+
+            auth_header = (self.headers.get("Authorization") or "").strip()
+            if not hmac.compare_digest(auth_header, expected_auth):
+                logger.warning("Rejected webhook with invalid Authorization header")
+                self._send_json(HTTPStatus.UNAUTHORIZED, {"error": "invalid_authorization"})
                 return
 
             try:
@@ -667,11 +702,6 @@ def _make_handler(
                 return
 
             raw_body = self.rfile.read(content_length)
-            auth_header = (self.headers.get("Authorization") or "").strip()
-            if not hmac.compare_digest(auth_header, expected_auth):
-                logger.warning("Rejected webhook with invalid Authorization header")
-                self._send_json(HTTPStatus.UNAUTHORIZED, {"error": "invalid_authorization"})
-                return
 
             ts_header = self.headers.get("X-Board-Timestamp") or ""
             sig_header = self.headers.get("X-Board-Signature") or ""
@@ -690,6 +720,9 @@ def _make_handler(
             except (UnicodeDecodeError, json.JSONDecodeError):
                 self._send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid_json"})
                 return
+            if not isinstance(payload, dict):
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid_payload"})
+                return
 
             if test_once_event is not None:
                 logger.info("Verified test webhook payload: %s", json.dumps(payload))
@@ -697,12 +730,16 @@ def _make_handler(
                 test_once_event.set()
                 return
 
-            board = str(payload.get("board", "")).strip()
-            principal = str(payload.get("principal", "")).strip().lower() or None
-            subscription_id = str(payload.get("subscription_id", "")).strip() or None
-            latest_seq = int(payload.get("latest_seq", 0) or 0)
-            unread = int(payload.get("unread_for_you", 0) or 0)
-            nudge_id = str(payload.get("nudge_id", "")).strip() or None
+            try:
+                board = str(payload.get("board", "")).strip()
+                principal = str(payload.get("principal", "")).strip().lower() or None
+                subscription_id = str(payload.get("subscription_id", "")).strip() or None
+                latest_seq = int(payload.get("latest_seq", 0) or 0)
+                unread = int(payload.get("unread_for_you", 0) or 0)
+                nudge_id = str(payload.get("nudge_id", "")).strip() or None
+            except (TypeError, ValueError):
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid_payload_fields"})
+                return
 
             self._send_json(HTTPStatus.OK, {"ok": True})
 

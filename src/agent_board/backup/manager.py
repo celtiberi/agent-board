@@ -8,6 +8,7 @@ import os
 import shutil
 import sqlite3
 import tempfile
+import threading
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -47,10 +48,7 @@ def _hardlink_or_copy_tree(src_root: Path, dst_root: Path) -> None:
 
 def _prune_retention(backups_dir: Path, *, retain_daily: int, retain_weekly: int) -> None:
     db_files = sorted(backups_dir.glob("board-*.db"), reverse=True)
-    keep: set[Path] = set()
-    seen_days: set[str] = set()
-    seen_weeks: set[str] = set()
-
+    parsed_files: list[tuple[Path, str, str]] = []
     for path in db_files:
         stem = path.stem  # board-YYYYMMDD-HHMMSS
         parts = stem.split("-")
@@ -62,14 +60,21 @@ def _prune_retention(backups_dir: Path, *, retain_daily: int, retain_weekly: int
         except ValueError:
             continue
         week_key = f"{dt.isocalendar().year}-W{dt.isocalendar().week:02d}"
+        parsed_files.append((path, day_str, week_key))
+
+    keep: set[Path] = set()
+    seen_days: set[str] = set()
+    seen_weeks: set[str] = set()
+    for path, day_str, week_key in parsed_files:
         if day_str not in seen_days and len(seen_days) < retain_daily:
             seen_days.add(day_str)
+            seen_weeks.add(week_key)
             keep.add(path)
         elif week_key not in seen_weeks and len(seen_weeks) < retain_weekly:
             seen_weeks.add(week_key)
             keep.add(path)
 
-    for path in db_files:
+    for path, _, _ in parsed_files:
         if path not in keep:
             path.unlink(missing_ok=True)
             ts_suffix = path.stem.removeprefix("board-")
@@ -78,70 +83,86 @@ def _prune_retention(backups_dir: Path, *, retain_daily: int, retain_weekly: int
                 shutil.rmtree(att_dir, ignore_errors=True)
 
 
+_BACKUP_LOCK = threading.Lock()
+
+
 def run_backup(services: AppServices, *, now: datetime | None = None) -> dict[str, Any]:
     """Run online SQLite .backup(), snapshot attachments, apply retention, and log run."""
-    current = now or utc_now()
-    started_iso = dt_to_iso(current)
-    ts_tag = current.strftime("%Y%m%d-%H%M%S")
+    with _BACKUP_LOCK:
+        current = now or utc_now()
+        started_iso = dt_to_iso(current)
+        ts_tag = current.strftime("%Y%m%d-%H%M%S")
 
-    backups_dir = services.settings.backups_dir
-    backups_dir.mkdir(parents=True, exist_ok=True)
-    db_backup_path = backups_dir / f"board-{ts_tag}.db"
-    att_snapshot_path = backups_dir / f"attachments-{ts_tag}"
+        backups_dir = services.settings.backups_dir
+        backups_dir.mkdir(parents=True, exist_ok=True)
+        os.chmod(backups_dir, 0o700)
+        db_backup_path = backups_dir / f"board-{ts_tag}.db"
+        att_snapshot_path = backups_dir / f"attachments-{ts_tag}"
 
-    ok = True
-    detail = "Backup completed"
-    size_bytes = 0
-    try:
-        src = sqlite3.connect(str(services.settings.db_path), timeout=10.0)
-        dst = sqlite3.connect(str(db_backup_path))
+        ok = True
+        detail = "Backup completed"
+        size_bytes = 0
+        tmp_path: Path | None = None
         try:
-            src.backup(dst)
-        finally:
-            dst.close()
-            src.close()
+            fd, tmp_name = tempfile.mkstemp(dir=str(backups_dir), prefix=".board-backup-", suffix=".tmp")
+            os.close(fd)
+            os.chmod(tmp_name, 0o600)
+            tmp_path = Path(tmp_name)
 
-        _hardlink_or_copy_tree(services.settings.attachments_dir, att_snapshot_path)
-        size_bytes = db_backup_path.stat().st_size if db_backup_path.exists() else 0
+            src = sqlite3.connect(str(services.settings.db_path), timeout=10.0)
+            dst = sqlite3.connect(str(tmp_path))
+            try:
+                src.backup(dst)
+            finally:
+                dst.close()
+                src.close()
+            os.chmod(tmp_path, 0o600)
+            os.replace(tmp_path, db_backup_path)
+            tmp_path = None
 
-        _prune_retention(
-            backups_dir,
-            retain_daily=services.settings.backup_retain_daily,
-            retain_weekly=services.settings.backup_retain_weekly,
-        )
-        cleanup_orphan_attachments(services, max_age_hours=24)
-        cutoff_iso = dt_to_iso(current - timedelta(days=30))
+            _hardlink_or_copy_tree(services.settings.attachments_dir, att_snapshot_path)
+            size_bytes = db_backup_path.stat().st_size if db_backup_path.exists() else 0
+
+            _prune_retention(
+                backups_dir,
+                retain_daily=services.settings.backup_retain_daily,
+                retain_weekly=services.settings.backup_retain_weekly,
+            )
+            cleanup_orphan_attachments(services, max_age_hours=24)
+            cutoff_iso = dt_to_iso(current - timedelta(days=30))
+            with services.db.write_tx() as conn:
+                idemp_store.prune_idempotency_keys_before(conn, cutoff_iso)
+                delivery_store.prune_outbox_before(conn, cutoff_iso)
+            services.db.checkpoint_wal()
+        except Exception as exc:
+            if tmp_path is not None and tmp_path.exists():
+                tmp_path.unlink(missing_ok=True)
+            ok = False
+            detail = str(exc)[:500]
+            logger.exception("Backup failed")
+
+        finished_iso = dt_to_iso(utc_now() if now is None else current)
+        backup_id = new_ulid()
         with services.db.write_tx() as conn:
-            idemp_store.prune_idempotency_keys_before(conn, cutoff_iso)
-            delivery_store.prune_outbox_before(conn, cutoff_iso)
-        services.db.checkpoint_wal()
-    except Exception as exc:
-        ok = False
-        detail = str(exc)[:500]
-        logger.exception("Backup failed")
-
-    finished_iso = dt_to_iso(utc_now() if now is None else current)
-    backup_id = new_ulid()
-    with services.db.write_tx() as conn:
-        backups_store.insert_backup_run(
-            conn,
-            backup_id=backup_id,
-            started_at=started_iso,
-            finished_at=finished_iso,
-            ok=ok,
-            db_backup_path=str(db_backup_path) if ok else None,
-            size_bytes=size_bytes,
-            detail=detail,
-        )
-    return {
-        "id": backup_id,
-        "ok": ok,
-        "started_at": started_iso,
-        "finished_at": finished_iso,
-        "db_backup_path": str(db_backup_path) if ok else None,
-        "size_bytes": size_bytes,
-        "detail": detail,
-    }
+            backups_store.insert_backup_run(
+                conn,
+                backup_id=backup_id,
+                started_at=started_iso,
+                finished_at=finished_iso,
+                ok=ok,
+                db_backup_path=str(db_backup_path) if ok else None,
+                size_bytes=size_bytes,
+                detail=detail,
+            )
+        return {
+            "id": backup_id,
+            "ok": ok,
+            "started_at": started_iso,
+            "finished_at": finished_iso,
+            "db_backup_path": str(db_backup_path) if ok else None,
+            "size_bytes": size_bytes,
+            "detail": detail,
+        }
 
 
 def check_backup_health(services: AppServices, *, now: datetime | None = None) -> bool:

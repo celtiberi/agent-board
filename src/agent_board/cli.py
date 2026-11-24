@@ -268,9 +268,13 @@ def serve(
     """Run the Agent Board HTTP + MCP + Web UI server."""
     settings = load_settings()
     if bind:
-        host, _, port_str = bind.rpartition(":")
-        host = host or "127.0.0.1"
-        port = int(port_str) if port_str.isdigit() else 8790
+        if ":" in bind:
+            host, _, port_str = bind.rpartition(":")
+            host = host.strip("[]") or "127.0.0.1"
+            port = int(port_str) if port_str.isdigit() else settings.bind_port
+        else:
+            host = bind.strip("[]") or "127.0.0.1"
+            port = settings.bind_port
     else:
         host = settings.bind_host
         port = settings.bind_port
@@ -282,13 +286,17 @@ def serve(
             host=host,
             port=port,
             reload=True,
+            proxy_headers=False,
         )
     else:
         from agent_board.app import create_app
 
         services = AppServices.create(settings)
-        app = create_app(services)
-        uvicorn.run(app, host=host, port=port)
+        try:
+            app = create_app(services)
+            uvicorn.run(app, host=host, port=port, proxy_headers=False)
+        finally:
+            services.close()
 
 
 @admin_app.command("admin-bot")

@@ -22,7 +22,9 @@ VALID_ISSUE_STATUSES = ("open", "in_progress", "resolved", "wont_fix")
 CLOSED_ISSUE_STATUSES = ("resolved", "wont_fix")
 
 
-def _resolve_assignee(conn: sqlite3.Connection, assignee: str | None) -> sqlite3.Row | None:
+def _resolve_assignee(
+    conn: sqlite3.Connection, assignee: str | None, *, board_id: str | None = None
+) -> sqlite3.Row | None:
     if assignee is None or not assignee.strip():
         return None
     handle = assignee.strip().lstrip("@").lower()
@@ -31,6 +33,9 @@ def _resolve_assignee(conn: sqlite3.Connection, assignee: str | None) -> sqlite3
         row = principals_store.get_principal_by_id(conn, assignee.strip())
     if row is None or row["kind"] == "system" or row["disabled_at"] is not None:
         raise NotFoundError(f"Assignee principal '{assignee}' not found")
+    if board_id is not None and not bool(row["is_server_owner"]):
+        if boards_store.get_membership(conn, board_id, row["id"]) is None:
+            raise NotFoundError(f"Assignee principal '{assignee}' not found on this board")
     return row
 
 
@@ -122,7 +127,7 @@ def open_issue(
 
     with services.db.write_tx() as conn:
         board, _ = require_board_role(conn, ctx, board_slug, "agent")
-        assignee_row = _resolve_assignee(conn, assignee)
+        assignee_row = _resolve_assignee(conn, assignee, board_id=board["id"])
 
         def _do() -> dict[str, Any]:
             now_iso = utc_now_iso()
@@ -273,7 +278,7 @@ def update_issue(
                 new_assignee_id = None
                 new_assignee_handle = None
             else:
-                arow = _resolve_assignee(conn, assignee)
+                arow = _resolve_assignee(conn, assignee, board_id=board["id"])
                 assert arow is not None
                 if arow["id"] != new_assignee_id:
                     assignee_changed = True
@@ -407,10 +412,10 @@ def close_issue(
         issue = issues_store.get_issue_by_ref(conn, board["id"], ref_kind, ref_val)
         if issue is None:
             raise NotFoundError(f"Issue '{ref}' not found on board '{board_slug}'")
-        if issue["status"] in CLOSED_ISSUE_STATUSES:
-            raise ConflictError(f"Issue I-{issue['number']} is already '{issue['status']}'")
 
         def _do() -> dict[str, Any]:
+            if issue["status"] in CLOSED_ISSUE_STATUSES:
+                raise ConflictError(f"Issue I-{issue['number']} is already '{issue['status']}'")
             now_iso = utc_now_iso()
             label = f"I-{issue['number']}"
             msg = post_message_in_tx(
@@ -500,10 +505,10 @@ def reopen_issue(
         issue = issues_store.get_issue_by_ref(conn, board["id"], ref_kind, ref_val)
         if issue is None:
             raise NotFoundError(f"Issue '{ref}' not found on board '{board_slug}'")
-        if issue["status"] not in CLOSED_ISSUE_STATUSES:
-            raise ConflictError(f"Issue I-{issue['number']} is already '{issue['status']}'")
 
         def _do() -> dict[str, Any]:
+            if issue["status"] not in CLOSED_ISSUE_STATUSES:
+                raise ConflictError(f"Issue I-{issue['number']} is already '{issue['status']}'")
             now_iso = utc_now_iso()
             label = f"I-{issue['number']}"
             msg = post_message_in_tx(

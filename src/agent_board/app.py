@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import FastAPI, Request
+from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
@@ -63,6 +64,16 @@ def create_app(
     api = FastAPI(title="Agent Board", version=__version__, lifespan=lifespan)
     api.state.services = app_services
 
+    @api.middleware("http")
+    async def security_headers_middleware(request: Request, call_next: Any) -> Any:
+        response = await call_next(request)
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        if not request.url.path.startswith("/api/"):
+            response.headers.setdefault("X-Frame-Options", "DENY")
+            response.headers.setdefault("Content-Security-Policy", "frame-ancestors 'none'")
+            response.headers.setdefault("Referrer-Policy", "same-origin")
+        return response
+
     @api.exception_handler(DomainError)
     async def domain_error_handler(request: Request, exc: DomainError) -> Any:
         headers = {}
@@ -92,13 +103,14 @@ def create_app(
 
     @api.exception_handler(RequestValidationError)
     async def request_validation_handler(_request: Request, exc: RequestValidationError) -> JSONResponse:
+        errors = jsonable_encoder(exc.errors())
         return JSONResponse(
             status_code=422,
             content={
                 "error": {
                     "code": "validation_error",
-                    "message": str(exc.errors()[0]["msg"]) if exc.errors() else "Validation error",
-                    "details": exc.errors(),
+                    "message": str(errors[0]["msg"]) if errors else "Validation error",
+                    "details": errors,
                 }
             },
         )

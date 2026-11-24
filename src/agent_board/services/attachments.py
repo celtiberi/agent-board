@@ -106,6 +106,10 @@ def upload_attachment(
             code="attachment_too_large",
         )
 
+    # Authorize before spending CPU on secret scanning or writing blobs.
+    rconn = services.db.read_conn()
+    require_board_role(rconn, ctx, board_slug, "agent")
+
     if clean_ct in _TEXT_ATTACHMENT_TYPES:
         decoded = content_bytes.decode("utf-8", errors="replace")
         scrubbed_text, secret_redacted = services.redactor.scrub_text(decoded)
@@ -115,45 +119,59 @@ def upload_attachment(
 
     sha256_hex = hashlib.sha256(content_bytes).hexdigest()
     target_path = blob_path(services, sha256_hex)
+    created_blob = False
 
-    with services.db.write_tx() as conn:
-        board, _ = require_board_role(conn, ctx, board_slug, "agent")
-        used = messages_store.get_board_attachments_size(conn, board["id"])
-        if used + size > services.settings.max_board_attachments_bytes:
-            raise ValidationError("Board attachment storage quota exceeded", code="quota_exceeded")
+    try:
+        with services.db.write_tx() as conn:
+            board, _ = require_board_role(conn, ctx, board_slug, "agent")
+            used = messages_store.get_board_attachments_size(conn, board["id"])
+            if used + size > services.settings.max_board_attachments_bytes:
+                raise ValidationError("Board attachment storage quota exceeded", code="quota_exceeded")
 
-        if not target_path.exists():
-            target_path.parent.mkdir(parents=True, exist_ok=True)
-            fd, tmp_name = tempfile.mkstemp(dir=target_path.parent, prefix=".tmp_")
+            if not target_path.exists():
+                target_path.parent.mkdir(parents=True, exist_ok=True)
+                fd, tmp_name = tempfile.mkstemp(dir=target_path.parent, prefix=".tmp_")
+                try:
+                    with os.fdopen(fd, "wb") as fh:
+                        fh.write(content_bytes)
+                        fh.flush()
+                        os.fsync(fh.fileno())
+                    os.replace(tmp_name, target_path)
+                    created_blob = True
+                finally:
+                    if os.path.exists(tmp_name):
+                        os.unlink(tmp_name)
+
+            att_id = new_ulid()
+            now_iso = utc_now_iso()
+            messages_store.insert_attachment(
+                conn,
+                attachment_id=att_id,
+                board_id=board["id"],
+                filename=clean_name,
+                content_type=clean_ct,
+                size_bytes=size,
+                sha256=sha256_hex,
+                uploaded_by=ctx.principal_id,
+                created_at=now_iso,
+            )
+            record_audit(
+                conn,
+                ctx=ctx,
+                action="attachment.upload",
+                ok=True,
+                board_id=board["id"],
+                target=att_id,
+                detail={"filename": clean_name, "size_bytes": size, "sha256": sha256_hex},
+            )
+    except BaseException:
+        if created_blob and target_path.exists():
             try:
-                os.write(fd, content_bytes)
-                os.fsync(fd)
-            finally:
-                os.close(fd)
-            os.replace(tmp_name, target_path)
-
-        att_id = new_ulid()
-        now_iso = utc_now_iso()
-        messages_store.insert_attachment(
-            conn,
-            attachment_id=att_id,
-            board_id=board["id"],
-            filename=clean_name,
-            content_type=clean_ct,
-            size_bytes=size,
-            sha256=sha256_hex,
-            uploaded_by=ctx.principal_id,
-            created_at=now_iso,
-        )
-        record_audit(
-            conn,
-            ctx=ctx,
-            action="attachment.upload",
-            ok=True,
-            board_id=board["id"],
-            target=att_id,
-            detail={"filename": clean_name, "size_bytes": size, "sha256": sha256_hex},
-        )
+                if messages_store.count_sha256_references(services.db.read_conn(), sha256_hex) == 0:
+                    target_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+        raise
     return {
         "id": att_id,
         "board_slug": board["slug"],
@@ -176,6 +194,10 @@ def get_attachment_for_download(
     if board is None:
         raise NotFoundError("Attachment board not found")
     require_board_role(conn, ctx, board["slug"], "readonly", allow_archived=True)
+    if att["message_id"] is not None:
+        msg_row = messages_store.get_message_by_id(conn, att["message_id"])
+        if msg_row is not None and msg_row["redacted_at"] is not None:
+            raise NotFoundError(f"Attachment '{attachment_id}' is no longer available")
 
     path = blob_path(services, att["sha256"])
     if not path.exists():

@@ -312,7 +312,12 @@ def login_human(
                         totp_ok = bool(totp_code and totp.verify(totp_code.strip(), valid_window=1))
 
                     if not password_ok or not totp_ok:
-                        failures = int(auth_row["failed_attempts"]) + 1
+                        prev_failures = (
+                            0
+                            if (locked_until and iso_to_dt(locked_until) <= now)
+                            else int(auth_row["failed_attempts"])
+                        )
+                        failures = prev_failures + 1
                         new_locked: str | None = None
                         if failures >= services.settings.login_max_failures:
                             new_locked = dt_to_iso(now + timedelta(seconds=services.settings.login_lockout_seconds))
@@ -386,7 +391,7 @@ def logout_session(services: AppServices, session_token: str | None) -> None:
 
 
 def require_server_owner(ctx: AuthContext) -> None:
-    if not ctx.is_server_owner and ctx.auth_kind != "system":
+    if not ctx.has_server_owner_privilege:
         raise PermissionDeniedError("Server owner privileges required", code="owner_required")
 
 
@@ -473,6 +478,8 @@ def create_principal(
         if password is not None:
             if kind != "human":
                 raise ValidationError("Only human principals can have passwords")
+            if len(password) < 6:
+                raise ValidationError("Password must be at least 6 characters")
             principals_store.upsert_human_auth(
                 conn,
                 principal_id=pid,
@@ -513,6 +520,10 @@ def set_human_password(
             password_hash=_PH.hash(password),
             totp_secret_enc=totp_enc,
             updated_at=now_iso,
+        )
+        conn.execute(
+            "UPDATE web_sessions SET revoked_at = ? WHERE principal_id = ? AND revoked_at IS NULL",
+            (now_iso, principal["id"]),
         )
 
 
@@ -727,7 +738,7 @@ def set_membership(
         raise ValidationError("role must be owner, agent, or readonly")
     now_iso = utc_now_iso()
     with services.db.write_tx() as conn:
-        if ctx.is_server_owner:
+        if ctx.has_server_owner_privilege:
             board = boards_store.get_board_by_slug(conn, board_slug)
             if board is None:
                 raise NotFoundError(f"Board '{board_slug}' not found")
@@ -743,7 +754,7 @@ def set_membership(
             role=role,
             created_at=now_iso,
         )
-        if ctx.is_server_owner and principal["kind"] == "agent" and not bool(principal["is_server_owner"]):
+        if ctx.has_server_owner_privilege and principal["kind"] == "agent" and not bool(principal["is_server_owner"]):
             principals_store.sync_agent_token_board_scopes(
                 conn, principal_id=principal["id"], add_slug=board["slug"]
             )
@@ -768,7 +779,7 @@ def remove_membership(
     services: AppServices, ctx: AuthContext, *, board_slug: str, principal_handle: str
 ) -> dict[str, Any]:
     with services.db.write_tx() as conn:
-        if ctx.is_server_owner:
+        if ctx.has_server_owner_privilege:
             board = boards_store.get_board_by_slug(conn, board_slug)
             if board is None:
                 raise NotFoundError(f"Board '{board_slug}' not found")

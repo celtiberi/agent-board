@@ -639,14 +639,15 @@ def get_nudge_unread_details(
                ) AS has_any_to
         FROM messages m
         JOIN threads t ON t.id = m.thread_id
-        WHERE m.board_id = ? AND m.seq > ? AND m.author_id != ?
+        WHERE m.board_id = ? AND m.seq > ? AND m.author_id != ? AND m.redacted_at IS NULL
         ORDER BY m.seq ASC
         """,
         (principal_id, board_id, read_seq, principal_id),
     ).fetchall()
-    flt = filter_cfg or {}
+    flt = filter_cfg if isinstance(filter_cfg, dict) else {}
     mentions_only = bool(flt.get("mentions_only", False))
-    allowed_types = flt.get("types") or []
+    raw_types = flt.get("types")
+    allowed_types = raw_types if isinstance(raw_types, list) else []
 
     unread_count = len(rows)
     seen_types: list[str] = []
@@ -660,8 +661,6 @@ def get_nudge_unread_details(
         if row["type"] not in seen_types:
             seen_types.append(row["type"])
         is_to = bool(row["is_to"])
-        if is_to:
-            mentioned = True
         is_silent = bool(row["silent"])
         matches = (not is_silent) and (
             is_to
@@ -672,6 +671,8 @@ def get_nudge_unread_details(
             )
         )
         if matches:
+            if is_to:
+                mentioned = True
             if str(row["priority"]) == "urgent":
                 has_urgent = True
             trigger_seqs.append(int(row["seq"]))

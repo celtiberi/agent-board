@@ -243,22 +243,25 @@ def get_recipients_for_messages(
     """Return (to_by_msg, cc_by_msg) handle lists sorted by handle for each message ID."""
     if not message_ids:
         return {}, {}
-    placeholders = ",".join("?" for _ in message_ids)
-    rows = conn.execute(
-        f"""
-        SELECT mn.message_id, p.handle, mn.role
-        FROM mentions mn
-        JOIN principals p ON p.id = mn.principal_id
-        WHERE mn.message_id IN ({placeholders})
-        ORDER BY p.handle
-        """,
-        message_ids,
-    ).fetchall()
     to_map: dict[str, list[str]] = {}
     cc_map: dict[str, list[str]] = {}
-    for row in rows:
-        target = cc_map if row["role"] == "cc" else to_map
-        target.setdefault(row["message_id"], []).append(row["handle"])
+    chunk_size = 500
+    for i in range(0, len(message_ids), chunk_size):
+        chunk = message_ids[i : i + chunk_size]
+        placeholders = ",".join("?" for _ in chunk)
+        rows = conn.execute(
+            f"""
+            SELECT mn.message_id, p.handle, mn.role
+            FROM mentions mn
+            JOIN principals p ON p.id = mn.principal_id
+            WHERE mn.message_id IN ({placeholders})
+            ORDER BY p.handle
+            """,
+            chunk,
+        ).fetchall()
+        for row in rows:
+            target = cc_map if row["role"] == "cc" else to_map
+            target.setdefault(row["message_id"], []).append(row["handle"])
     return to_map, cc_map
 
 
@@ -269,19 +272,22 @@ def get_mentions_for_messages(conn: sqlite3.Connection, message_ids: list[str]) 
 def get_attachments_for_messages(conn: sqlite3.Connection, message_ids: list[str]) -> dict[str, list[sqlite3.Row]]:
     if not message_ids:
         return {}
-    placeholders = ",".join("?" for _ in message_ids)
-    rows = conn.execute(
-        f"""
-        SELECT *
-        FROM attachments
-        WHERE message_id IN ({placeholders})
-        ORDER BY created_at ASC
-        """,
-        message_ids,
-    ).fetchall()
     result: dict[str, list[sqlite3.Row]] = {}
-    for row in rows:
-        result.setdefault(row["message_id"], []).append(row)
+    chunk_size = 500
+    for i in range(0, len(message_ids), chunk_size):
+        chunk = message_ids[i : i + chunk_size]
+        placeholders = ",".join("?" for _ in chunk)
+        rows = conn.execute(
+            f"""
+            SELECT *
+            FROM attachments
+            WHERE message_id IN ({placeholders})
+            ORDER BY created_at ASC
+            """,
+            chunk,
+        ).fetchall()
+        for row in rows:
+            result.setdefault(row["message_id"], []).append(row)
     return result
 
 

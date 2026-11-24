@@ -120,7 +120,25 @@ async def upload_attachment(
     ctx: AuthContext = Depends(require_api_write),
     services: AppServices = Depends(get_services),
 ) -> dict[str, Any]:
-    content = await file.read()
+    from agent_board.errors import ValidationError
+    from agent_board.services.auth import require_board_role
+
+    require_board_role(services.db.read_conn(), ctx, slug, "agent")
+    max_bytes = services.settings.max_attachment_bytes
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await file.read(65_536)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > max_bytes:
+            raise ValidationError(
+                f"Attachment size exceeds limit of {max_bytes} bytes",
+                code="attachment_too_large",
+            )
+        chunks.append(chunk)
+    content = b"".join(chunks)
     return att_svc.upload_attachment(
         services,
         ctx,

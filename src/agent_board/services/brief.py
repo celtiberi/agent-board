@@ -94,7 +94,7 @@ def _find_open_tasks_and_questions(
     open_tasks: list[dict[str, Any]] = []
     for row in task_rows:
         data = json.loads(row["data"]) if row["data"] else {}
-        explicit_assignee = str(data.get("assignee", "")).strip().lower()
+        explicit_assignee = str(data.get("assignee", "")).strip().lstrip("@").lower()
         if explicit_assignee:
             if explicit_assignee != caller_handle:
                 continue
@@ -150,7 +150,7 @@ def _find_open_tasks_and_questions(
     unanswered_questions: list[dict[str, Any]] = []
     for row in question_rows:
         data = json.loads(row["data"]) if row["data"] else {}
-        explicit_for = str(data.get("for", "")).strip().lower()
+        explicit_for = str(data.get("for", "")).strip().lstrip("@").lower()
         if explicit_for:
             if explicit_for != caller_handle:
                 continue
@@ -387,7 +387,8 @@ def get_brief(services: AppServices, ctx: AuthContext, *, board_slug: str) -> di
         after_seq = 0
         if summary_row is not None:
             s_data = json.loads(summary_row["data"]) if summary_row["data"] else {}
-            covers_to = int(s_data.get("covers_to_seq", summary_row["seq"]))
+            raw_covers_to = int(s_data.get("covers_to_seq", summary_row["seq"]))
+            covers_to = max(0, min(raw_covers_to, int(summary_row["seq"])))
             covers_from = int(s_data.get("covers_from_seq", 1))
             after_seq = covers_to
             latest_summary = {

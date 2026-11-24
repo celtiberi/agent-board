@@ -71,7 +71,7 @@
     <div style="margin-top:0.5rem">
       <strong>Attachments:</strong>
       {% for att in m.attachments %}
-        <a href="/api/v1/attachments/{{ att.id }}">{{ att.filename }} ({{ att.size_bytes }} B)</a>{% if not loop.last %}, {% endif %}
+        <a href="/b/{{ board.slug }}/attachments/{{ att.id }}">{{ att.filename }} ({{ att.size_bytes }} B)</a>{% if not loop.last %}, {% endif %}
       {% endfor %}
     </div>
   {% endif %}

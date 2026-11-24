@@ -204,6 +204,28 @@ def create_web_router() -> APIRouter:
             return JSONResponse(content={"ok": True, "id": msg["id"], "seq": msg["seq"]})
         return _redirect("/monitor")
 
+    @router.get("/b/{slug}/attachments/{attachment_id}", response_model=None)
+    def web_download_attachment(request: Request, slug: str, attachment_id: str) -> Response:
+        ctx = _session_ctx(request)
+        if ctx is None:
+            return _redirect("/login")
+        meta, blob_path = att_svc.get_attachment_for_download(
+            _services(request),
+            ctx,
+            attachment_id=attachment_id,
+        )
+        if meta.get("board_slug") and meta["board_slug"] != slug:
+            return JSONResponse(status_code=404, content={"error": {"code": "not_found", "message": "Not found"}})
+        safe_name = str(meta["filename"]).replace('"', "_")
+        return FileResponse(
+            blob_path,
+            media_type=meta["content_type"],
+            headers={
+                "Content-Disposition": f'attachment; filename="{safe_name}"',
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
+
     @router.get("/b/{slug}", response_model=None)
     def board_home(request: Request, slug: str, state: str = Query(default="open")) -> Response:
         ctx = _session_ctx(request)

@@ -373,6 +373,9 @@ def post_message_in_tx(
         thread_title=thread_title,
         data=validated_data,
     )
+    serialized_data = json.dumps(clean_data) if clean_data is not None else None
+    if serialized_data is not None and len(serialized_data.encode("utf-8")) > services.settings.max_message_bytes:
+        raise ValidationError(f"Message data exceeds limit of {services.settings.max_message_bytes} bytes")
     redacted = pre_redacted or tx_redacted
 
     ts = now_iso or utc_now_iso()
@@ -606,14 +609,6 @@ def edit_message(
         if thread is None or thread["closed_at"] is not None:
             raise ValidationError("Thread is closed and read-only", code="thread_closed")
 
-        latest = messages_store.get_latest_message_for_root(conn, target["root_id"])
-        assert latest is not None
-        if latest["id"] != target["id"]:
-            raise ConflictError(
-                f"Message '{message_id}' was already edited; edit latest version '{latest['id']}'",
-                code="already_superseded",
-            )
-
         raw_validated_data = (
             validate_message_data(services, target["type"], data)
             if data is not None
@@ -624,8 +619,18 @@ def edit_message(
             body_md=body_md,
             data=raw_validated_data,
         )
+        serialized_data = json.dumps(clean_data) if clean_data is not None else None
+        if serialized_data is not None and len(serialized_data.encode("utf-8")) > services.settings.max_message_bytes:
+            raise ValidationError(f"Message data exceeds limit of {services.settings.max_message_bytes} bytes")
 
         def _do() -> dict[str, Any]:
+            latest = messages_store.get_latest_message_for_root(conn, target["root_id"])
+            assert latest is not None
+            if latest["id"] != target["id"]:
+                raise ConflictError(
+                    f"Message '{message_id}' was already edited; edit latest version '{latest['id']}'",
+                    code="already_superseded",
+                )
             now_iso = utc_now_iso()
             warnings = ["secret redacted"] if redacted else []
             to_ids, cc_ids, is_broadcast, is_directed = _resolve_recipients(
@@ -653,13 +658,17 @@ def edit_message(
                 priority=target_priority,
                 silent=is_silent,
                 body_md=clean_body,
-                data_json=json.dumps(clean_data) if clean_data is not None else None,
+                data_json=serialized_data,
                 warnings_json=json.dumps(warnings),
                 reply_to_id=target["reply_to_id"],
                 supersedes_id=target["id"],
                 root_id=target["root_id"],
                 root_seq=int(target["root_seq"]),
                 created_at=now_iso,
+            )
+            conn.execute(
+                "UPDATE attachments SET message_id = ? WHERE message_id = ? AND board_id = ?",
+                (new_id, target["id"], board["id"]),
             )
             messages_store.insert_recipients(conn, new_id, to_ids=to_ids, cc_ids=cc_ids)
             messages_store.upsert_message_fts(
@@ -742,6 +751,10 @@ def redact_message(
         target = messages_store.get_message_by_id(conn, message_id)
         if target is None or target["board_id"] != board["id"]:
             raise NotFoundError(f"Message '{message_id}' not found on board '{board_slug}'")
+        if target["type"] in ("decision", "issue"):
+            raise ValidationError(
+                f"Cannot redact '{target['type']}' messages directly; use revoke_decision or issue tools"
+            )
 
         now_iso = utc_now_iso()
         date_str = now_iso[:10]
@@ -752,6 +765,18 @@ def redact_message(
             redacted_body=redacted_body,
             redacted_at=now_iso,
         )
+        # Remove attachment records linked to any version in the redacted chain
+        att_rows = conn.execute(
+            """
+            SELECT id, sha256 FROM attachments
+            WHERE message_id IN (SELECT id FROM messages WHERE root_id = ?)
+            """,
+            (target["root_id"],),
+        ).fetchall()
+        removed_shas: list[str] = []
+        for ar in att_rows:
+            conn.execute("DELETE FROM attachments WHERE id = ?", (ar["id"],))
+            removed_shas.append(str(ar["sha256"]))
         messages_store.delete_message_fts_by_root(conn, target["root_id"])
         record_audit(
             conn,
@@ -760,11 +785,24 @@ def redact_message(
             ok=True,
             board_id=board["id"],
             target=target["root_id"],
-            detail={"reason": clean_reason, "versions_redacted": len(redacted_rows)},
+            detail={
+                "reason": clean_reason,
+                "versions_redacted": len(redacted_rows),
+                "attachments_removed": len(removed_shas),
+            },
         )
         latest = messages_store.get_latest_message_for_root(conn, target["root_id"])
         assert latest is not None
-        return _hydrate_messages(conn, [latest])[0]
+        hydrated = _hydrate_messages(conn, [latest])[0]
+
+    if removed_shas:
+        from agent_board.services.attachments import blob_path
+
+        rconn = services.db.read_conn()
+        for sha in set(removed_shas):
+            if messages_store.count_sha256_references(rconn, sha) == 0:
+                blob_path(services, sha).unlink(missing_ok=True)
+    return hydrated
 
 
 def read_messages(

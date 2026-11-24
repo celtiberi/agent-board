@@ -19,6 +19,51 @@ from agent_board.store import principals as principals_store
 
 MAX_DND_MINUTES = 240
 DEFAULT_DND_MINUTES = 30
+MAX_SUB_INTERVAL_S = 86_400
+_VALID_FILTER_KEYS = frozenset({"exclude_self", "mentions_only", "types"})
+_VALID_FILTER_MSG_TYPES = frozenset(
+    {"note", "task", "question", "decision", "issue", "status", "retest_report", "summary", "system"}
+)
+
+
+def _validate_filter_cfg(raw: Any) -> dict[str, Any]:
+    if raw is None:
+        return {"exclude_self": True, "mentions_only": False}
+    if not isinstance(raw, dict):
+        raise ValidationError("Subscription filter must be a JSON object")
+    unknown = set(raw.keys()) - _VALID_FILTER_KEYS
+    if unknown:
+        raise ValidationError(f"Unknown subscription filter key(s): {', '.join(sorted(unknown))}")
+    cleaned: dict[str, Any] = {}
+    if "exclude_self" in raw and raw["exclude_self"] is not None:
+        if not isinstance(raw["exclude_self"], bool):
+            raise ValidationError("filter.exclude_self must be a boolean")
+        cleaned["exclude_self"] = raw["exclude_self"]
+    if "mentions_only" in raw and raw["mentions_only"] is not None:
+        if not isinstance(raw["mentions_only"], bool):
+            raise ValidationError("filter.mentions_only must be a boolean")
+        cleaned["mentions_only"] = raw["mentions_only"]
+    if "types" in raw and raw["types"] is not None:
+        if not isinstance(raw["types"], list) or not all(isinstance(t, str) for t in raw["types"]):
+            raise ValidationError("filter.types must be a list of message type strings")
+        bad = [t for t in raw["types"] if t not in _VALID_FILTER_MSG_TYPES]
+        if bad:
+            raise ValidationError(f"Invalid message type(s) in filter.types: {', '.join(bad)}")
+        cleaned["types"] = list(dict.fromkeys(raw["types"]))
+    cleaned.setdefault("exclude_self", True)
+    cleaned.setdefault("mentions_only", False)
+    return cleaned
+
+
+def _validate_boards_for_caller(conn: sqlite3.Connection, ctx: AuthContext, boards: list[str]) -> None:
+    if ctx.has_server_owner_privilege:
+        return
+    for slug in boards:
+        if slug == "*":
+            if "*" not in ctx.board_scope:
+                raise PermissionDeniedError("Token scope does not allow wildcard board subscriptions")
+        else:
+            require_board_role(conn, ctx, slug, "readonly", allow_archived=True)
 
 
 def get_cursor_status(
@@ -124,7 +169,8 @@ def subscription_matches_message(
     if "*" not in sub_boards and board_slug not in sub_boards:
         return False
 
-    flt: dict[str, Any] = json.loads(sub_row["filter"])
+    flt_raw = json.loads(sub_row["filter"]) if sub_row["filter"] else {}
+    flt: dict[str, Any] = flt_raw if isinstance(flt_raw, dict) else {}
     exclude_self = bool(flt.get("exclude_self", True))
     if exclude_self and sub_row["principal_id"] == author_id:
         return False
@@ -141,7 +187,7 @@ def subscription_matches_message(
         return False
 
     allowed_types = flt.get("types")
-    if allowed_types is not None and len(allowed_types) > 0:
+    if isinstance(allowed_types, list) and len(allowed_types) > 0:
         if msg_type not in allowed_types:
             return False
 
@@ -174,9 +220,9 @@ def set_dnd(
     """Enable finite Do-Not-Disturb wake deferral or clear it and expedite pending wakes."""
     target_handle = principal_handle.strip().lstrip("@").lower() if principal_handle else ctx.handle
     if target_handle != ctx.handle:
-        if not ctx.is_server_owner:
+        if not ctx.has_server_owner_privilege:
             raise PermissionDeniedError("Only the server owner can manage another principal's DND")
-    elif not ctx.is_server_owner and ctx.max_role == "readonly":
+    elif not ctx.has_server_owner_privilege and ctx.max_role == "readonly":
         raise PermissionDeniedError("Readonly tokens cannot modify DND status")
 
     if enabled:
@@ -321,12 +367,14 @@ def create_subscription(
     clean_url = _validate_webhook_url(url)
     if payload_format != "default":
         raise ValidationError("payload_format must be 'default'")
-    if min_interval_s < 0 or debounce_s < 0:
-        raise ValidationError("min_interval_s and debounce_s must be >= 0")
+    if min_interval_s < 0 or min_interval_s > MAX_SUB_INTERVAL_S:
+        raise ValidationError(f"min_interval_s must be between 0 and {MAX_SUB_INTERVAL_S}")
+    if debounce_s < 0 or debounce_s > MAX_SUB_INTERVAL_S:
+        raise ValidationError(f"debounce_s must be between 0 and {MAX_SUB_INTERVAL_S}")
 
     target_principal_id = ctx.principal_id
     if principal_handle and principal_handle != ctx.handle:
-        if not ctx.is_server_owner:
+        if not ctx.has_server_owner_privilege:
             raise PermissionDeniedError("Only the server owner can manage other principals' subscriptions")
         from agent_board.store import principals as principals_store
 
@@ -334,20 +382,19 @@ def create_subscription(
         if p is None or p["kind"] == "system":
             raise NotFoundError(f"Principal '{principal_handle}' not found")
         target_principal_id = p["id"]
-    elif not ctx.is_server_owner:
-        # Must be at least agent on at least one board (checked against token max_role)
+    elif not ctx.has_server_owner_privilege:
         if ctx.max_role == "readonly":
             raise PermissionDeniedError("Readonly tokens cannot manage subscriptions")
 
     clean_boards = [b.strip() for b in (boards or ["*"]) if b.strip()] or ["*"]
-    clean_filter = dict(filter_cfg or {})
-    clean_filter.setdefault("exclude_self", True)
-    clean_filter.setdefault("mentions_only", False)
+    clean_filter = _validate_filter_cfg(filter_cfg)
 
     clean_auth_header = normalize_auth_header(auth_header)
     secret_plain = hmac_secret or f"whsec_{secrets.token_urlsafe(32)}"
+    audit_url, _ = services.redactor.scrub_text(clean_url)
 
     with services.db.write_tx() as conn:
+        _validate_boards_for_caller(conn, ctx, clean_boards)
 
         def _do() -> dict[str, Any]:
             now_iso = utc_now_iso()
@@ -374,7 +421,7 @@ def create_subscription(
                 action="subscription.create",
                 ok=True,
                 target=sub_id,
-                detail={"url": clean_url, "boards": clean_boards},
+                detail={"url": audit_url, "boards": clean_boards},
             )
             row = delivery_store.get_subscription_by_id(conn, sub_id)
             out = subscription_to_dict(row)
@@ -404,7 +451,7 @@ def list_subscriptions(
     services: AppServices, ctx: AuthContext, *, all_principals: bool = False
 ) -> list[dict[str, Any]]:
     conn = services.db.read_conn()
-    if all_principals and ctx.is_server_owner:
+    if all_principals and ctx.has_server_owner_privilege:
         rows = delivery_store.list_all_subscriptions(conn)
     else:
         rows = delivery_store.list_subscriptions_for_principal(conn, ctx.principal_id)
@@ -412,11 +459,13 @@ def list_subscriptions(
 
 
 def delete_subscription(services: AppServices, ctx: AuthContext, *, sub_id: str) -> dict[str, Any]:
+    if not ctx.has_server_owner_privilege and ctx.max_role == "readonly":
+        raise PermissionDeniedError("Readonly tokens cannot manage subscriptions")
     with services.db.write_tx() as conn:
         row = delivery_store.get_subscription_by_id(conn, sub_id)
         if row is None:
             raise NotFoundError(f"Subscription '{sub_id}' not found")
-        if row["principal_id"] != ctx.principal_id and not ctx.is_server_owner:
+        if row["principal_id"] != ctx.principal_id and not ctx.has_server_owner_privilege:
             raise PermissionDeniedError("Cannot delete another principal's subscription")
         delivery_store.delete_subscription(conn, sub_id)
         record_audit(conn, ctx=ctx, action="subscription.delete", ok=True, target=sub_id)
@@ -437,17 +486,19 @@ def update_subscription(
     debounce_s: int | None = None,
 ) -> dict[str, Any]:
     """Update mutable webhook subscription fields in place while preserving ID and delivery cursor."""
-    if min_interval_s is not None and min_interval_s < 0:
-        raise ValidationError("min_interval_s must be >= 0")
-    if debounce_s is not None and debounce_s < 0:
-        raise ValidationError("debounce_s must be >= 0")
+    if not ctx.has_server_owner_privilege and ctx.max_role == "readonly":
+        raise PermissionDeniedError("Readonly tokens cannot manage subscriptions")
+    if min_interval_s is not None and (min_interval_s < 0 or min_interval_s > MAX_SUB_INTERVAL_S):
+        raise ValidationError(f"min_interval_s must be between 0 and {MAX_SUB_INTERVAL_S}")
+    if debounce_s is not None and (debounce_s < 0 or debounce_s > MAX_SUB_INTERVAL_S):
+        raise ValidationError(f"debounce_s must be between 0 and {MAX_SUB_INTERVAL_S}")
     clean_url_input = _validate_webhook_url(url) if url is not None else None
 
     with services.db.write_tx() as conn:
         row = delivery_store.get_subscription_by_id(conn, sub_id)
         if row is None:
             raise NotFoundError(f"Subscription '{sub_id}' not found")
-        if row["principal_id"] != ctx.principal_id and not ctx.is_server_owner:
+        if row["principal_id"] != ctx.principal_id and not ctx.has_server_owner_privilege:
             raise PermissionDeniedError("Cannot update another principal's subscription")
 
         next_url = clean_url_input if clean_url_input is not None else str(row["url"])
@@ -456,15 +507,18 @@ def update_subscription(
             if boards is not None
             else [str(b) for b in json.loads(row["boards"])]
         )
-        next_filter = dict(json.loads(row["filter"]))
+        if boards is not None:
+            _validate_boards_for_caller(conn, ctx, next_boards)
+        merged_filter = dict(json.loads(row["filter"]))
         if filter_cfg is not None:
+            if not isinstance(filter_cfg, dict):
+                raise ValidationError("Subscription filter must be a JSON object")
             for k, v in filter_cfg.items():
                 if v is None:
-                    next_filter.pop(k, None)
+                    merged_filter.pop(k, None)
                 else:
-                    next_filter[k] = v
-        next_filter.setdefault("exclude_self", True)
-        next_filter.setdefault("mentions_only", False)
+                    merged_filter[k] = v
+        next_filter = _validate_filter_cfg(merged_filter)
 
         next_interval = int(min_interval_s) if min_interval_s is not None else int(row["min_interval_s"])
         next_debounce = int(debounce_s) if debounce_s is not None else int(row["debounce_s"])
@@ -489,24 +543,27 @@ def update_subscription(
             debounce_s=next_debounce,
             now_iso=now_iso,
         )
+        audit_url, _ = services.redactor.scrub_text(next_url)
         record_audit(
             conn,
             ctx=ctx,
             action="subscription.update",
             ok=True,
             target=sub_id,
-            detail={"url": next_url, "boards": next_boards},
+            detail={"url": audit_url, "boards": next_boards},
         )
         updated = delivery_store.get_subscription_by_id(conn, sub_id)
         return subscription_to_dict(updated)
 
 
 def reenable_subscription(services: AppServices, ctx: AuthContext, *, sub_id: str) -> dict[str, Any]:
+    if not ctx.has_server_owner_privilege and ctx.max_role == "readonly":
+        raise PermissionDeniedError("Readonly tokens cannot manage subscriptions")
     with services.db.write_tx() as conn:
         row = delivery_store.get_subscription_by_id(conn, sub_id)
         if row is None:
             raise NotFoundError(f"Subscription '{sub_id}' not found")
-        if row["principal_id"] != ctx.principal_id and not ctx.is_server_owner:
+        if row["principal_id"] != ctx.principal_id and not ctx.has_server_owner_privilege:
             raise PermissionDeniedError("Cannot modify another principal's subscription")
         delivery_store.heal_subscription_delivery(
             conn,

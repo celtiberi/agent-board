@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
+import tempfile
 import tomllib
 from pathlib import Path
 from typing import Any
@@ -13,6 +15,22 @@ import httpx
 import typer
 
 from agent_board.constants import ACTIONABLE_MESSAGE_TYPES
+from agent_board.ids import is_valid_handle
+
+
+def _write_private_file(path: Path, content: str, *, mode: int = 0o600) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(content)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.chmod(tmp_name, mode)
+        os.replace(tmp_name, path)
+    finally:
+        if os.path.exists(tmp_name):
+            os.unlink(tmp_name)
 
 
 def install_local_agent_profile(
@@ -24,28 +42,37 @@ def install_local_agent_profile(
 ) -> dict[str, str]:
     """Install a named profile, wrapper CLI (~/.local/bin/board-<handle>), and optional Antigravity MCP entry."""
     clean_handle = handle.strip().lower()
+    if not is_valid_handle(clean_handle):
+        raise ValueError(f"Invalid agent handle: {handle!r}")
+    clean_url = url.strip().rstrip("/")
+    clean_token = token.strip()
+    if any(ch in clean_url for ch in ("\n", "\r", "\x00")) or any(ch in clean_token for ch in ("\n", "\r", "\x00")):
+        raise ValueError("URL and token must not contain control characters or newlines")
+
     cfg_dir = Path("~/.config/agent-board").expanduser()
+    cfg_dir.mkdir(parents=True, exist_ok=True)
+    os.chmod(cfg_dir, 0o700)
     profiles_dir = cfg_dir / "profiles"
     profiles_dir.mkdir(parents=True, exist_ok=True)
     os.chmod(profiles_dir, 0o700)
 
     profile_path = profiles_dir / f"{clean_handle}.toml"
-    profile_path.write_text(
-        f'url = "{url.rstrip("/")}"\ntoken = "{token}"\n',
-        encoding="utf-8",
+    _write_private_file(
+        profile_path,
+        f"url = {json.dumps(clean_url)}\ntoken = {json.dumps(clean_token)}\n",
+        mode=0o600,
     )
-    os.chmod(profile_path, 0o600)
 
     bin_dir = Path("~/.local/bin").expanduser()
     bin_dir.mkdir(parents=True, exist_ok=True)
     board_bin = shutil.which("board") or str(bin_dir / "board")
 
     wrapper_path = bin_dir / f"board-{clean_handle}"
-    wrapper_path.write_text(
-        f'#!/bin/sh\nexec "{board_bin}" --profile "{clean_handle}" "$@"\n',
-        encoding="utf-8",
+    _write_private_file(
+        wrapper_path,
+        f'#!/bin/sh\nexec {shlex.quote(board_bin)} --profile {shlex.quote(clean_handle)} "$@"\n',
+        mode=0o755,
     )
-    os.chmod(wrapper_path, 0o755)
 
     out = {
         "profile_path": str(profile_path),
@@ -63,8 +90,7 @@ def install_local_agent_profile(
             "command": board_bin,
             "args": ["--profile", clean_handle, "mcp-stdio"],
         }
-        mcp_path.write_text(json.dumps(mcp_data, indent=2) + "\n", encoding="utf-8")
-        os.chmod(mcp_path, 0o600)
+        _write_private_file(mcp_path, json.dumps(mcp_data, indent=2) + "\n", mode=0o600)
         out["mcp_config_path"] = str(mcp_path)
         out["mcp_server_name"] = mcp_name
 
@@ -209,8 +235,7 @@ def bind_antigravity_conversation(
         "conversation_id": clean_conv,
         "subscription_id": sub_data["id"],
     }
-    active_path.write_text(json.dumps(mapping, indent=2) + "\n", encoding="utf-8")
-    os.chmod(active_path, 0o600)
+    _write_private_file(active_path, json.dumps(mapping, indent=2) + "\n", mode=0o600)
 
     return {
         "board": clean_board,

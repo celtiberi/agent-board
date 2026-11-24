@@ -178,6 +178,10 @@ async def onboard_agent(
     if not clean_boards:
         raise ValidationError("At least one board slug (or '*') is required")
 
+    clean_webhook_url = (webhook_url or "").strip()
+    if clean_webhook_url:
+        delivery_svc._validate_webhook_url(clean_webhook_url)
+
     rconn = services.db.read_conn()
     if "*" not in clean_boards:
         for slug in clean_boards:

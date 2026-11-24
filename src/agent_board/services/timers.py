@@ -154,7 +154,7 @@ def list_timers(
         raise ValidationError("status must be one of: pending, fired, cancelled, all")
     with services.db.read_snapshot() as conn:
         board, _ = require_board_role(conn, ctx, board_slug, "readonly", allow_archived=True)
-        filter_pid = None if (all_principals and ctx.is_server_owner) else ctx.principal_id
+        filter_pid = None if (all_principals and ctx.has_server_owner_privilege) else ctx.principal_id
         rows = timers_store.list_timers_for_board(
             conn,
             board_id=board["id"],
@@ -176,7 +176,7 @@ def cancel_timer(
         row = timers_store.get_timer_by_id(conn, timer_id)
         if row is None or row["board_id"] != board["id"]:
             raise NotFoundError(f"Timer '{timer_id}' not found on board '{board_slug}'")
-        if row["principal_id"] != ctx.principal_id and not ctx.is_server_owner:
+        if row["principal_id"] != ctx.principal_id and not ctx.has_server_owner_privilege:
             raise PermissionDeniedError("Only the timer owner or server owner can cancel a timer")
         if row["status"] == "fired":
             raise ConflictError("Timer has already fired", code="timer_already_fired")
@@ -228,12 +228,12 @@ def process_due_timers(services: AppServices, *, now: datetime | None = None) ->
     with services.db.read_snapshot() as rconn:
         due_rows = timers_store.list_due_timers(rconn, now_iso=now_iso, limit=20)
 
-    for row in due_rows:
+    for due_row in due_rows:
         processed += 1
-        timer_id = str(row["id"])
+        timer_id = str(due_row["id"])
         with services.db.write_tx() as conn:
-            fresh = timers_store.get_timer_by_id(conn, timer_id)
-            if fresh is None or fresh["status"] != "pending":
+            row = timers_store.get_timer_for_firing(conn, timer_id)
+            if row is None or row["status"] != "pending":
                 continue
 
             has_board_access = bool(row["principal_is_server_owner"]) or bool(row["is_board_member"])

@@ -261,13 +261,13 @@ def supersede_decision(
         old_row = decisions_store.get_decision_by_ref(conn, board["id"], ref_kind, ref_val)
         if old_row is None:
             raise NotFoundError(f"Decision '{old_ref}' not found on board '{board_slug}'")
-        if old_row["status"] != "active":
-            raise ConflictError(
-                f"Decision D-{old_row['number']} has status '{old_row['status']}' and cannot be superseded",
-                code="decision_not_active",
-            )
 
         def _do() -> dict[str, Any]:
+            if old_row["status"] != "active":
+                raise ConflictError(
+                    f"Decision D-{old_row['number']} has status '{old_row['status']}' and cannot be superseded",
+                    code="decision_not_active",
+                )
             now_iso = utc_now_iso()
             new_num = boards_store.allocate_next_decision_num(conn, board["id"])
             old_label = f"D-{old_row['number']}"
@@ -408,13 +408,13 @@ def revoke_decision(
         row = decisions_store.get_decision_by_ref(conn, board["id"], ref_kind, ref_val)
         if row is None:
             raise NotFoundError(f"Decision '{ref}' not found on board '{board_slug}'")
-        if row["status"] != "active":
-            raise ConflictError(
-                f"Decision D-{row['number']} has status '{row['status']}' and cannot be revoked",
-                code="decision_not_active",
-            )
 
         def _do() -> dict[str, Any]:
+            if row["status"] != "active":
+                raise ConflictError(
+                    f"Decision D-{row['number']} has status '{row['status']}' and cannot be revoked",
+                    code="decision_not_active",
+                )
             now_iso = utc_now_iso()
             label = f"D-{row['number']}"
             msg = post_message_in_tx(

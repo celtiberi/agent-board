@@ -209,11 +209,10 @@ def test_admin_bot_owner_allowlisted_flows_and_anti_loop(env, tmp_path: Path) ->
     handled = run_once(cfg, board_client=bot_client)
     assert handled == 6  # @all message was skipped, all 6 direct @board-admin commands executed
 
-    # Cursor advanced past latest message.
-    assert bot_client.read_messages("alpha")["messages"] == []
-
-    # Second run handles 0 messages (no self-loop).
+    # Second run handles 0 messages (no self-loop) and leaves no non-bot unread messages.
     assert run_once(cfg, board_client=bot_client) == 0
+    remaining = bot_client.read_messages("alpha")["messages"]
+    assert all(m["author_handle"] == "board-admin" for m in remaining)
 
     # Side effects landed.
     boards = {b["slug"] for b in bot_client.list_boards()}
@@ -280,7 +279,7 @@ def test_admin_bot_enforces_trusted_vs_standard_caller_boundaries(env, tmp_path:
     all_msgs = bot_client.read_messages("alpha", since_seq=0)["messages"]
     replies = [m["body_md"] for m in all_msgs if m["author_handle"] == "board-admin"]
     assert any("Created board `dev-proj`" in r for r in replies)
-    assert any("boards you belong to" in r for r in replies)
+    assert any("boards where you have write access" in r for r in replies)
     assert any("`alpha`" in r and "`dev-proj`" in r and "secret-proj" not in r for r in replies)
     assert any("requires a server owner" in r for r in replies)
     assert any("requires `dev` tag or server owner" in r for r in replies)

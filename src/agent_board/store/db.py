@@ -66,13 +66,19 @@ class Database:
 
     @contextmanager
     def read_snapshot(self) -> Iterator[sqlite3.Connection]:
-        """Execute multiple SELECTs against a consistent WAL snapshot."""
+        """Execute multiple SELECTs against a consistent WAL snapshot (re-entrant)."""
         conn = self.read_conn()
-        conn.execute("BEGIN DEFERRED;")
+        depth = getattr(self._local, "read_depth", 0)
+        is_outer = depth == 0
+        if is_outer:
+            conn.execute("BEGIN DEFERRED;")
+        self._local.read_depth = depth + 1
         try:
             yield conn
         finally:
-            conn.execute("ROLLBACK;")
+            self._local.read_depth = depth
+            if is_outer and conn.in_transaction:
+                conn.execute("ROLLBACK;")
 
     @contextmanager
     def write_tx(self) -> Iterator[sqlite3.Connection]:
@@ -90,17 +96,24 @@ class Database:
             except BaseException:
                 self._write_depth -= 1
                 if is_outer:
-                    conn.execute("ROLLBACK;")
+                    if conn.in_transaction:
+                        conn.execute("ROLLBACK;")
                 else:
                     conn.execute(f"ROLLBACK TO SAVEPOINT sp_{self._write_depth};")
                     conn.execute(f"RELEASE SAVEPOINT sp_{self._write_depth};")
                 raise
             else:
-                self._write_depth -= 1
-                if is_outer:
-                    conn.execute("COMMIT;")
-                else:
-                    conn.execute(f"RELEASE SAVEPOINT sp_{self._write_depth};")
+                try:
+                    if is_outer:
+                        conn.execute("COMMIT;")
+                    else:
+                        conn.execute(f"RELEASE SAVEPOINT sp_{self._write_depth - 1};")
+                except BaseException:
+                    if is_outer and conn.in_transaction:
+                        conn.execute("ROLLBACK;")
+                    raise
+                finally:
+                    self._write_depth -= 1
 
     def apply_migrations(self, migrations_dir: Path) -> list[str]:
         """Apply any unapplied .sql files in migrations_dir in lexical order."""

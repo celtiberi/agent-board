@@ -95,6 +95,27 @@ def list_timers_for_board(
     ).fetchall()
 
 
+def get_timer_for_firing(conn: sqlite3.Connection, timer_id: str) -> sqlite3.Row | None:
+    return conn.execute(
+        """
+        SELECT tm.*, b.slug AS board_slug, b.archived_at AS board_archived_at,
+               p.handle AS principal_handle, p.disabled_at AS principal_disabled_at,
+               p.is_server_owner AS principal_is_server_owner,
+               EXISTS(
+                   SELECT 1 FROM memberships mb
+                   WHERE mb.board_id = tm.board_id AND mb.principal_id = tm.principal_id
+               ) AS is_board_member,
+               t.title AS thread_title, t.closed_at AS thread_closed_at
+        FROM timers tm
+        JOIN boards b ON b.id = tm.board_id
+        JOIN principals p ON p.id = tm.principal_id
+        LEFT JOIN threads t ON t.id = tm.thread_id
+        WHERE tm.id = ?
+        """,
+        (timer_id,),
+    ).fetchone()
+
+
 def list_due_timers(conn: sqlite3.Connection, *, now_iso: str, limit: int = 20) -> list[sqlite3.Row]:
     return conn.execute(
         """

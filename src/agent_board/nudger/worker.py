@@ -47,7 +47,10 @@ class NudgeWorker:
         self._transport = transport
 
     def _build_client(self) -> httpx.AsyncClient:
-        kwargs: dict[str, Any] = {"timeout": self.services.settings.nudge_timeout_s}
+        kwargs: dict[str, Any] = {
+            "timeout": self.services.settings.nudge_timeout_s,
+            "follow_redirects": False,
+        }
         if self._transport is not None:
             kwargs["transport"] = self._transport
         return httpx.AsyncClient(**kwargs)
@@ -119,30 +122,47 @@ class NudgeWorker:
         timestamp: int,
         payload: dict[str, Any],
     ) -> dict[str, Any]:
-        raw_body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
-        hmac_secret = self.services.crypto.decrypt(hmac_secret_enc)
-        sig = sign_nudge(hmac_secret, timestamp, raw_body)
-        headers: dict[str, str] = {
-            "Content-Type": "application/json",
-            "X-Board-Nudge-Id": nudge_id,
-            "X-Board-Timestamp": str(timestamp),
-            "X-Board-Signature": sig,
-        }
-        if auth_header_enc:
-            norm_auth = normalize_auth_header(self.services.crypto.decrypt(auth_header_enc))
-            if norm_auth:
-                headers["Authorization"] = norm_auth
-
         try:
-            async with self._build_client() as client:
-                resp = await client.post(url, content=raw_body, headers=headers)
-            if 200 <= resp.status_code < 300:
-                return {"ok": True, "status_code": resp.status_code, "error": None}
-            return {
-                "ok": False,
-                "status_code": resp.status_code,
-                "error": f"HTTP {resp.status_code}: {resp.text[:200]}",
+            raw_body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+            hmac_secret = self.services.crypto.decrypt(hmac_secret_enc)
+            sig = sign_nudge(hmac_secret, timestamp, raw_body)
+            headers: dict[str, str] = {
+                "Content-Type": "application/json",
+                "X-Board-Nudge-Id": nudge_id,
+                "X-Board-Timestamp": str(timestamp),
+                "X-Board-Signature": sig,
             }
+            if auth_header_enc:
+                norm_auth = normalize_auth_header(self.services.crypto.decrypt(auth_header_enc))
+                if norm_auth:
+                    headers["Authorization"] = norm_auth
+
+            total_timeout = max(1.0, float(self.services.settings.nudge_timeout_s))
+
+            async def _send_bounded() -> dict[str, Any]:
+                async with self._build_client() as client:
+                    async with client.stream("POST", url, content=raw_body, headers=headers) as resp:
+                        chunks: list[bytes] = []
+                        read_bytes = 0
+                        async for chunk in resp.aiter_bytes():
+                            take = chunk[: max(0, 4096 - read_bytes)]
+                            if take:
+                                chunks.append(take)
+                                read_bytes += len(take)
+                            if read_bytes >= 4096:
+                                break
+                        snippet = b"".join(chunks).decode("utf-8", errors="replace")[:200]
+                        if 200 <= resp.status_code < 300:
+                            return {"ok": True, "status_code": resp.status_code, "error": None}
+                        return {
+                            "ok": False,
+                            "status_code": resp.status_code,
+                            "error": f"HTTP {resp.status_code}: {snippet}",
+                        }
+
+            return await asyncio.wait_for(_send_bounded(), timeout=total_timeout)
+        except TimeoutError:
+            return {"ok": False, "status_code": None, "error": "Webhook request timed out"}
         except Exception as exc:
             return {"ok": False, "status_code": None, "error": str(exc)[:300]}
 
@@ -164,109 +184,119 @@ class NudgeWorker:
         processed = 0
         for row in due_rows:
             processed += 1
-            if not row["active"]:
-                with self.services.db.write_tx() as conn:
-                    delivery_store.mark_outbox_suppressed(conn, outbox_id=row["id"], reason="subscription_inactive")
-                continue
-
-            rconn = self.services.db.read_conn()
-            read_seq = delivery_store.get_cursor(rconn, row["principal_id"], row["board_id"])
-            if read_seq >= int(row["latest_seq"]):
-                with self.services.db.write_tx() as conn:
-                    delivery_store.mark_outbox_suppressed(conn, outbox_id=row["id"], reason="already_acked")
-                    if int(row["failure_count"]) > 0:
-                        delivery_store.heal_subscription_delivery(
-                            conn,
-                            sub_id=row["subscription_id"],
-                            now_iso=now_iso,
-                            force_enable=False,
+            try:
+                if not row["active"]:
+                    with self.services.db.write_tx() as conn:
+                        delivery_store.mark_outbox_suppressed(
+                            conn, outbox_id=row["id"], reason="subscription_inactive"
                         )
-                continue
+                    continue
 
-            details = delivery_store.get_nudge_unread_details(
-                rconn,
-                board_id=row["board_id"],
-                principal_id=row["principal_id"],
-                read_seq=read_seq,
-                filter_cfg=json.loads(row["filter"]),
-            )
-            unread_count = int(details["unread_count"])
-            if unread_count == 0:
-                with self.services.db.write_tx() as conn:
-                    delivery_store.mark_outbox_suppressed(conn, outbox_id=row["id"], reason="zero_unread")
-                continue
+                rconn = self.services.db.read_conn()
+                read_seq = delivery_store.get_cursor(rconn, row["principal_id"], row["board_id"])
+                if read_seq >= int(row["latest_seq"]):
+                    with self.services.db.write_tx() as conn:
+                        delivery_store.mark_outbox_suppressed(conn, outbox_id=row["id"], reason="already_acked")
+                        if int(row["failure_count"]) > 0:
+                            delivery_store.heal_subscription_delivery(
+                                conn,
+                                sub_id=row["subscription_id"],
+                                now_iso=now_iso,
+                                force_enable=False,
+                            )
+                    continue
 
-            dnd_until = row["principal_dnd_until"] if "principal_dnd_until" in row.keys() else None
-            if dnd_until and str(dnd_until) > now_iso and not details.get("urgent"):
-                with self.services.db.write_tx() as conn:
-                    delivery_store.defer_sending_outbox_until(
-                        conn, outbox_id=row["id"], defer_until_iso=str(dnd_until)
-                    )
-                continue
+                raw_filter = json.loads(row["filter"]) if row["filter"] else {}
+                details = delivery_store.get_nudge_unread_details(
+                    rconn,
+                    board_id=row["board_id"],
+                    principal_id=row["principal_id"],
+                    read_seq=read_seq,
+                    filter_cfg=raw_filter if isinstance(raw_filter, dict) else {},
+                )
+                unread_count = int(details["unread_count"])
+                if unread_count == 0 or not details["trigger_seqs"]:
+                    reason = "zero_unread" if unread_count == 0 else "no_matching_triggers"
+                    with self.services.db.write_tx() as conn:
+                        delivery_store.mark_outbox_suppressed(conn, outbox_id=row["id"], reason=reason)
+                    continue
 
-            payload = {
-                "event": "board.activity",
-                "board": row["board_slug"],
-                "principal": row["principal_handle"],
-                "subscription_id": row["subscription_id"],
-                "latest_seq": int(row["latest_seq"]),
-                "unread_for_you": unread_count,
-                "types": details["types"],
-                "mentioned": details["mentioned"],
-                "urgent": bool(details.get("urgent", False)),
-                "trigger_seqs": details["trigger_seqs"],
-                "trigger_threads": details["trigger_threads"],
-                "reason": details["reason"],
-                "nudge_id": row["id"],
-                "sent_at": now_iso,
-            }
-            delivery_res = await self._deliver_http(
-                url=row["url"],
-                auth_header_enc=row["auth_header_enc"],
-                hmac_secret_enc=row["hmac_secret_enc"],
-                nudge_id=row["id"],
-                timestamp=int(current.timestamp()),
-                payload=payload,
-            )
-
-            if delivery_res["ok"]:
-                with self.services.db.write_tx() as conn:
-                    delivery_store.mark_outbox_sent(
-                        conn,
-                        outbox_id=row["id"],
-                        subscription_id=row["subscription_id"],
-                        now_iso=utc_now_iso() if now is None else now_iso,
-                    )
-            else:
-                new_attempt = int(row["attempt"]) + 1
-                age_s = (current - iso_to_dt(row["created_at"])).total_seconds()
-                dead = age_s >= _DEAD_AFTER_S
-                delay_s = compute_retry_delay_s(new_attempt)
-                next_attempt = dt_to_iso(current + timedelta(seconds=delay_s))
-                err_msg = str(delivery_res["error"] or "delivery failed")
-
-                with self.services.db.write_tx() as conn:
-                    failures, auto_disabled = delivery_store.record_outbox_failure(
-                        conn,
-                        outbox_id=row["id"],
-                        subscription_id=row["subscription_id"],
-                        new_attempt=new_attempt,
-                        next_attempt_at=next_attempt,
-                        dead=dead,
-                        last_error=err_msg,
-                        now_iso=now_iso,
-                    )
-                    if auto_disabled:
-                        self._post_auto_disable_alerts(
-                            conn,
-                            board_slug=row["board_slug"],
-                            principal_handle=row["principal_handle"],
-                            sub_id=row["subscription_id"],
-                            failures=failures,
-                            err_msg=err_msg,
-                            now_iso=now_iso,
+                dnd_until = row["principal_dnd_until"] if "principal_dnd_until" in row.keys() else None
+                if dnd_until and str(dnd_until) > now_iso and not details.get("urgent"):
+                    with self.services.db.write_tx() as conn:
+                        delivery_store.defer_sending_outbox_until(
+                            conn, outbox_id=row["id"], defer_until_iso=str(dnd_until)
                         )
+                    continue
+
+                payload = {
+                    "event": "board.activity",
+                    "board": row["board_slug"],
+                    "principal": row["principal_handle"],
+                    "subscription_id": row["subscription_id"],
+                    "latest_seq": int(row["latest_seq"]),
+                    "unread_for_you": unread_count,
+                    "types": details["types"],
+                    "mentioned": details["mentioned"],
+                    "urgent": bool(details.get("urgent", False)),
+                    "trigger_seqs": details["trigger_seqs"],
+                    "trigger_threads": details["trigger_threads"],
+                    "reason": details["reason"],
+                    "nudge_id": row["id"],
+                    "sent_at": now_iso,
+                }
+                delivery_res = await self._deliver_http(
+                    url=row["url"],
+                    auth_header_enc=row["auth_header_enc"],
+                    hmac_secret_enc=row["hmac_secret_enc"],
+                    nudge_id=row["id"],
+                    timestamp=int(current.timestamp()),
+                    payload=payload,
+                )
+
+                if delivery_res["ok"]:
+                    with self.services.db.write_tx() as conn:
+                        delivery_store.mark_outbox_sent(
+                            conn,
+                            outbox_id=row["id"],
+                            subscription_id=row["subscription_id"],
+                            now_iso=utc_now_iso() if now is None else now_iso,
+                        )
+                else:
+                    self._handle_outbox_failure(row, current, now_iso, str(delivery_res["error"] or "delivery failed"))
+            except Exception as exc:
+                logger.exception("Outbox row %s failed unexpectedly", row["id"])
+                self._handle_outbox_failure(row, current, now_iso, f"worker error: {exc}"[:300])
         return processed
+
+    def _handle_outbox_failure(self, row: Any, current: datetime, now_iso: str, err_msg: str) -> None:
+        new_attempt = int(row["attempt"]) + 1
+        age_s = (current - iso_to_dt(row["created_at"])).total_seconds()
+        dead = age_s >= _DEAD_AFTER_S
+        delay_s = compute_retry_delay_s(new_attempt)
+        next_attempt = dt_to_iso(current + timedelta(seconds=delay_s))
+
+        with self.services.db.write_tx() as conn:
+            failures, auto_disabled = delivery_store.record_outbox_failure(
+                conn,
+                outbox_id=row["id"],
+                subscription_id=row["subscription_id"],
+                new_attempt=new_attempt,
+                next_attempt_at=next_attempt,
+                dead=dead,
+                last_error=err_msg,
+                now_iso=now_iso,
+            )
+            if auto_disabled:
+                self._post_auto_disable_alerts(
+                    conn,
+                    board_slug=row["board_slug"],
+                    principal_handle=row["principal_handle"],
+                    sub_id=row["subscription_id"],
+                    failures=failures,
+                    err_msg=err_msg,
+                    now_iso=now_iso,
+                )
 
     def _post_auto_disable_alerts(
         self,

@@ -2,6 +2,34 @@
 
 All notable changes to `agent-board` will be documented in this file.
 
+## [0.7.1] - 2026-11-24
+
+### Security
+- **Scoped Server-Owner Token Enforcement** (`services/context.py`, `services/auth.py`, `services/delivery.py`, `services/timers.py`, `http/routes_subscriptions.py`):
+  - Require `max_role == "owner"` and `"*" in board_scope` (via `AuthContext.has_server_owner_privilege`) before granting server-owner capabilities, preventing readonly or single-board tokens belonging to a server-owner principal from calling admin endpoints.
+- **Readonly Subscription Guard & Filter Validation** (`services/delivery.py`, `http/routes_subscriptions.py`, `store/delivery.py`):
+  - Block `readonly` tokens from modifying, deleting, re-enabling, or test-firing webhook subscriptions.
+  - Validate subscription `filter` fields (`types`, `mentions_only`, `debounce_s`, `cooldown_s` capped at `86400s`) and board membership before inserting or updating subscriptions so malformed configs cannot crash the delivery worker.
+- **Secret Redaction & Password Lifecycle** (`secrets_scan.py`, `services/auth.py`, `services/delivery.py`):
+  - Close JSON-quoted secret redaction bypasses (`"password": "..."`, `"api_key": "..."`), enforce minimum password length on principal creation, revoke active web sessions on password rotation, and scrub webhook URLs before recording audit log entries.
+- **Web UI & Proxy Hardening** (`app.py`, `cli.py`, `http/deps.py`, `web/common.py`):
+  - Disable implicit `X-Forwarded-For` trust (`proxy_headers=False`), use `hmac.compare_digest` for CSRF verification, and emit `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Content-Security-Policy: frame-ancestors 'none'`, and `Referrer-Policy: same-origin` headers.
+- **Sidecar, CLI, Backup & Admin Bot Hardening** (`sidecar.py`, `cli_runtime.py`, `board_cli.py`, `backup/manager.py`, `admin_bot.py`, `admin_bot_prompts.json`):
+  - Enforce handle validation on CLI profile loading and local profile installation, escape wrapper script paths with `shlex.quote`, write credential/state files atomically with `0o600` permissions, and serialize SQLite backups with a lock and atomic `0o600` temp-file swap.
+  - Authenticate sidecar webhook requests before reading bodies, cap handler concurrency and socket timeout, and pass `--` before conversation IDs when invoking `agentapi`.
+  - Prevent `readonly` board members from self-escalating via `@board-admin`, scope non-owner `enable_webhooks` to shared boards, and cap bot actions to 5 per message.
+
+### Fixed
+- **Nudger & Timer Reliability** (`nudger/worker.py`, `services/timers.py`, `store/timers.py`, `services/onboarding.py`):
+  - Isolate per-row outbox errors (including corrupt encrypted secrets) so a single failing row cannot starve other deliveries, disable HTTP redirects and cap response reads at 4 KiB, suppress empty-unread outbox rows, re-fetch timer rows inside `write_tx()` before firing, and validate webhook URLs before mutating onboarding state.
+- **Storage, Search, Attachments & Domain Correctness** (`store/db.py`, `store/messages.py`, `services/search.py`, `services/attachments.py`, `services/messages.py`, `services/decisions.py`, `services/issues.py`, `services/brief.py`, `http/routes_messages.py`, `web/routes.py`, `web/templates/thread.html`, `mcp/tools.py`):
+  - Make `read_snapshot()` re-entrant and guard `write_tx()` `COMMIT` with rollback on failure; chunk large `IN (...)` lookups in message stores.
+  - Quote FTS5 reserved keywords (`AND`/`OR`/`NOT`/`NEAR`) and convert remaining SQLite query syntax errors into `400` validation errors; return `422` instead of `500` on non-serializable request validation errors.
+  - Authorize attachment uploads before reading, enforce streaming byte cutoffs and clean up orphan blobs on rollback, preserve attachments across `edit_message`, delete linked attachments on `redact_message` (and reject redacting `decision`/`issue` rows), and serve Web UI attachment downloads via `/b/{slug}/attachments/{id}` so `trusted_ip` sessions work.
+  - Move stale-state checks inside idempotent `_do()` callbacks for `edit_message`, `supersede_decision`, `revoke_decision`, `close_issue`, and `reopen_issue` so retries replay cleanly instead of returning `409`; enforce `max_message_bytes` on serialized `data_json`; scope issue assignees to board members; clamp `get_brief` summary `covers_to` to the summary sequence; fix MCP double request-limit counting and base64 pre-check.
+- **Admin Bot, Backup Retention & Telemetry** (`admin_bot.py`, `backup/manager.py`, `telemetry.py`, `board_cli.py`, `cli.py`):
+  - Stop `admin_bot.poll_board` from advancing the read cursor past concurrent messages via its own reply sequence; preserve non-timestamped `board-*.db` files and weekly slots during backup pruning; harden `telemetry.py` against non-dict JSONL lines, non-numeric token fields, `None` hit rates, and concurrent alert-state writes; fix `agent-board serve --bind <host>` without `:port` and close services on shutdown.
+
 ## [0.7.0] - 2026-11-24
 
 ### Added

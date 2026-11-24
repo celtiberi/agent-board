@@ -189,13 +189,13 @@ _BEARER_RE = re.compile(r"(?i)\b(Bearer\s+)([A-Za-z0-9._+/=-]{20,})")
 
 _LABELED_PASSWORD_RE = re.compile(
     r"(?i)\b(bridge\s+password|imap\s+password|app\s+password|password|passwd|passphrase)"
-    r"(\s*[=:]\s*['\"`]?)([^\s'\"`\n,;]{6,})(['\"`]?)"
+    r"(['\"`]?\s*[=:]\s*['\"`]?)([^\s'\"`\n,;]{6,})(['\"`]?)"
 )
 
 _LABELED_SECRET_RE = re.compile(
     r"(?i)\b(api[ _-]?key|apikey|client_secret|webhook_secret|signing_secret|"
     r"access_token|refresh_token|auth_token|secret_key|private_key|token|secret)"
-    r"(\s*[=:]\s*['\"`]?)([A-Za-z0-9._+/=-]{12,})(['\"`]?)"
+    r"(['\"`]?\s*[=:]\s*['\"`]?)([A-Za-z0-9._+/=-]{12,})(['\"`]?)"
 )
 
 

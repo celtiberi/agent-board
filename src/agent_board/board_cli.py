@@ -258,6 +258,85 @@ def ack(slug: str = typer.Argument(...), read_seq: int = typer.Argument(...)) ->
 
 
 @client_app.command()
+def remind(
+    slug: str = typer.Argument(...),
+    message: str = typer.Option(..., "--message", "-m", help="Follow-up reminder text."),
+    delay_minutes: int | None = typer.Option(
+        None, "--in", "-i", help="Minutes from now to fire (1-10080). Mutually exclusive with --at."
+    ),
+    due_at: str | None = typer.Option(
+        None, "--at", help="UTC ISO-8601 timestamp to fire (e.g. 2026-11-25T15:00:00Z)."
+    ),
+    thread: str | None = typer.Option(None, "--thread", "-t", help="Optional thread ID or title."),
+    cancel_on_reply: bool = typer.Option(
+        False,
+        "--cancel-on-reply",
+        help="Auto-cancel if someone else replies in --thread before due time.",
+    ),
+) -> None:
+    """Schedule a durable follow-up timer that wakes you on the board when due."""
+    payload: dict[str, Any] = {
+        "message": message,
+        "cancel_on_reply": cancel_on_reply,
+    }
+    if delay_minutes is not None:
+        payload["delay_minutes"] = delay_minutes
+    if due_at is not None:
+        payload["due_at"] = due_at
+    if thread is not None:
+        payload["thread_id"] = thread
+    with _client() as c:
+        data = _check_resp(c.post(f"/boards/{slug}/timers", json=payload))
+    typer.echo(json.dumps(data, indent=2))
+
+
+@client_app.command()
+def reminders(
+    slug: str = typer.Argument(...),
+    status: str = typer.Option("pending", "--status", help="Filter: pending, fired, cancelled, or all."),
+) -> None:
+    """List your follow-up timers on a board."""
+    with _client() as c:
+        data = _check_resp(c.get(f"/boards/{slug}/timers", params={"status": status}))
+    for t in data.get("timers", []):
+        thr = f" [{t['thread_title']}]" if t.get("thread_title") else ""
+        cor = " (cancel-on-reply)" if t.get("cancel_on_reply") else ""
+        typer.echo(f"{t['id']} [{t['status']}] due={t['due_at']}{thr}{cor}: {t['message']}")
+
+
+@client_app.command()
+def unremind(slug: str = typer.Argument(...), timer_id: str = typer.Argument(...)) -> None:
+    """Cancel a pending follow-up timer."""
+    with _client() as c:
+        data = _check_resp(c.delete(f"/boards/{slug}/timers/{timer_id}"))
+    typer.echo(json.dumps(data))
+
+
+@client_app.command()
+def handoff(
+    slug: str = typer.Argument(...),
+    thread: str = typer.Argument(..., help="Thread ID or title."),
+    message: str | None = typer.Option(None, "--message", "-m", help="Pinned progress/handoff summary."),
+    clear: bool = typer.Option(False, "--clear", help="Clear the thread's pinned handoff summary."),
+) -> None:
+    """Set or clear a pinned thread handoff summary surfaced in `board brief`."""
+    if not clear and not (message and message.strip()):
+        typer.echo("Provide --message/-m or --clear", err=True)
+        raise typer.Exit(1)
+    from urllib.parse import quote
+
+    encoded_thread = quote(thread, safe="")
+    with _client() as c:
+        data = _check_resp(
+            c.put(
+                f"/boards/{slug}/threads/{encoded_thread}/handoff",
+                json={"handoff_md": None if clear else message},
+            )
+        )
+    typer.echo(json.dumps({"thread_id": data["id"], "title": data["title"], "handoff_md": data.get("handoff_md")}))
+
+
+@client_app.command()
 def decide(
     slug: str = typer.Argument(...),
     title: str = typer.Option(..., "--title"),

@@ -12,6 +12,7 @@ import httpx
 
 from agent_board.ids import dt_to_iso, iso_to_dt, new_ulid, utc_now, utc_now_iso
 from agent_board.nudger.signing import sign_nudge
+from agent_board.services import timers as timers_svc
 from agent_board.services.context import AppServices, system_context
 from agent_board.services.delivery import normalize_auth_header
 from agent_board.services.messages import post_message_in_tx
@@ -146,10 +147,15 @@ class NudgeWorker:
             return {"ok": False, "status_code": None, "error": str(exc)[:300]}
 
     async def process_due_once(self, *, now: datetime | None = None) -> int:
-        """Recover stale leases, claim due rows, and send HTTP nudges."""
+        """Fire due follow-up timers, recover stale leases, claim due outbox rows, and send HTTP nudges."""
         current = now or utc_now()
         now_iso = dt_to_iso(current)
         stale_before_iso = dt_to_iso(current - timedelta(seconds=_STALE_LEASE_S))
+
+        try:
+            timers_svc.process_due_timers(self.services, now=current)
+        except Exception:
+            logger.exception("Unhandled error processing due follow-up timers")
 
         with self.services.db.write_tx() as conn:
             delivery_store.recover_stale_sending_outbox(conn, stale_before_iso)

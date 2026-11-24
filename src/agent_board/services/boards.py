@@ -48,6 +48,7 @@ def board_row_to_dict(row: sqlite3.Row, ctx: AuthContext) -> dict[str, Any]:
 
 
 def thread_row_to_dict(row: sqlite3.Row, board_slug: str) -> dict[str, Any]:
+    keys = set(row.keys())
     return {
         "id": row["id"],
         "board_id": row["board_id"],
@@ -57,6 +58,11 @@ def thread_row_to_dict(row: sqlite3.Row, board_slug: str) -> dict[str, Any]:
         "created_by_handle": row["created_by_handle"],
         "created_at": row["created_at"],
         "closed_at": row["closed_at"],
+        "handoff_md": row["handoff_md"] if "handoff_md" in keys else None,
+        "handoff_updated_by_handle": (
+            row["handoff_updated_by_handle"] if "handoff_updated_by_handle" in keys else None
+        ),
+        "handoff_updated_at": row["handoff_updated_at"] if "handoff_updated_at" in keys else None,
         "message_count": int(row["message_count"]),
         "last_seq": int(row["last_seq"]),
         "last_activity_at": row["last_activity_at"],
@@ -454,5 +460,55 @@ def close_thread(
             target=thread_id,
         )
         updated = boards_store.get_thread_by_id(conn, thread_id)
+        assert updated is not None
+        return thread_row_to_dict(updated, board["slug"])
+
+
+def set_thread_handoff(
+    services: AppServices,
+    ctx: AuthContext,
+    *,
+    board_slug: str,
+    thread_id: str,
+    handoff_md: str | None = None,
+) -> dict[str, Any]:
+    """Set or clear a pinned progress/handoff summary on a thread (surfaced in get_brief)."""
+    raw = (handoff_md or "").strip()
+    clean_handoff: str | None = None
+    if raw:
+        scrubbed, _ = services.redactor.scrub_text(raw)
+        clean_handoff = scrubbed.strip()[:1200] or None
+
+    with services.db.write_tx() as conn:
+        board, _ = require_board_role(conn, ctx, board_slug, "agent")
+        clean_tid = thread_id.strip()
+        thread = boards_store.get_thread_by_id(conn, clean_tid)
+        if thread is None or thread["board_id"] != board["id"]:
+            thread = boards_store.get_open_thread_by_title(conn, board["id"], clean_tid)
+            if thread is None:
+                thread = boards_store.get_thread_by_title(conn, board["id"], clean_tid)
+        if thread is None:
+            raise NotFoundError(f"Thread '{thread_id}' not found on board '{board_slug}'")
+        if clean_handoff is not None and thread["closed_at"] is not None:
+            raise ValidationError("Thread is closed and read-only", code="thread_closed")
+        now_iso = utc_now_iso()
+        resolved_id = str(thread["id"])
+        boards_store.set_thread_handoff(
+            conn,
+            thread_id=resolved_id,
+            handoff_md=clean_handoff,
+            updated_by=ctx.principal_id if clean_handoff else None,
+            updated_at=now_iso if clean_handoff else None,
+        )
+        record_audit(
+            conn,
+            ctx=ctx,
+            action="thread.handoff",
+            ok=True,
+            board_id=board["id"],
+            target=resolved_id,
+            detail={"cleared": clean_handoff is None},
+        )
+        updated = boards_store.get_thread_by_id(conn, resolved_id)
         assert updated is not None
         return thread_row_to_dict(updated, board["slug"])

@@ -53,6 +53,18 @@ class CreateThreadRequest(BaseModel):
     first_message: FirstMessageInput | None = None
 
 
+class SetThreadHandoffRequest(BaseModel):
+    handoff_md: str | None = None
+
+
+class CreateTimerRequest(BaseModel):
+    message: str
+    delay_minutes: int | None = None
+    due_at: str | None = None
+    thread_id: str | None = None
+    cancel_on_reply: bool = False
+
+
 class PostMessageRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 

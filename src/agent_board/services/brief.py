@@ -245,6 +245,7 @@ def _render_brief_markdown(
     recent_activity: list[dict[str, Any]],
     open_tasks: list[dict[str, Any]],
     unanswered_questions: list[dict[str, Any]],
+    thread_handoffs: list[dict[str, Any]],
     read_seq: int,
     unread_count: int,
     latest_seq: int,
@@ -282,6 +283,13 @@ def _render_brief_markdown(
                 f"- **{iss['ref']}** [{iss['severity']}] ({iss['status']}) "
                 f"{iss['title']} ({assignee}, opened {opened_date})"
             )
+
+    if thread_handoffs:
+        lines.extend(["", f"## Active Thread Handoffs ({len(thread_handoffs)})"])
+        for h in thread_handoffs:
+            who = f"@{h['updated_by_handle']}" if h.get("updated_by_handle") else "unknown"
+            summary = _headline(h["handoff_md"], limit=220)
+            lines.append(f"- **[{h['thread_title']}]** ({who}): {summary}")
 
     lines.extend(["", "## Latest Summary"])
     if latest_summary is None:
@@ -429,6 +437,17 @@ def get_brief(services: AppServices, ctx: AuthContext, *, board_slug: str) -> di
             caller_id=ctx.principal_id,
             caller_handle=ctx.handle,
         )
+        handoff_rows = boards_store.list_thread_handoffs(conn, board_id)
+        thread_handoffs = [
+            {
+                "thread_id": h["thread_id"],
+                "thread_title": h["thread_title"],
+                "handoff_md": h["handoff_md"],
+                "updated_by_handle": h["updated_by_handle"],
+                "updated_at": h["handoff_updated_at"],
+            }
+            for h in handoff_rows
+        ]
         member_rows = boards_store.list_memberships_for_board(conn, board_id)
         now_iso = utc_now_iso()
         members = [
@@ -453,6 +472,7 @@ def get_brief(services: AppServices, ctx: AuthContext, *, board_slug: str) -> di
         recent_activity=recent_activity,
         open_tasks=open_tasks,
         unanswered_questions=unanswered_questions,
+        thread_handoffs=thread_handoffs,
         read_seq=read_seq,
         unread_count=unread_count,
         latest_seq=latest_seq,
@@ -470,6 +490,24 @@ def get_brief(services: AppServices, ctx: AuthContext, *, board_slug: str) -> di
             recent_activity=recent_activity,
             open_tasks=open_tasks,
             unanswered_questions=unanswered_questions,
+            thread_handoffs=thread_handoffs,
+            read_seq=read_seq,
+            unread_count=unread_count,
+            latest_seq=latest_seq,
+            summarize_hint=summarize_hint,
+        )
+    if len(markdown.encode("utf-8")) > _BRIEF_MAX_BYTES and len(thread_handoffs) > 5:
+        markdown = _render_brief_markdown(
+            board=board,
+            members=members,
+            decisions=active_decisions,
+            titles_only=titles_only,
+            open_issues=open_issues,
+            latest_summary=latest_summary,
+            recent_activity=recent_activity,
+            open_tasks=open_tasks,
+            unanswered_questions=unanswered_questions,
+            thread_handoffs=thread_handoffs[:5],
             read_seq=read_seq,
             unread_count=unread_count,
             latest_seq=latest_seq,
@@ -487,6 +525,7 @@ def get_brief(services: AppServices, ctx: AuthContext, *, board_slug: str) -> di
         "active_decisions": active_decisions,
         "decisions_titles_only": titles_only,
         "open_issues": open_issues,
+        "thread_handoffs": thread_handoffs,
         "latest_summary": latest_summary,
         "recent_activity": recent_activity,
         "open_tasks_for_caller": open_tasks,

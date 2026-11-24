@@ -601,6 +601,74 @@ def _load_recent_outbox(
     ]
 
 
+def _load_needs_input(
+    conn: sqlite3.Connection,
+    *,
+    principal_id: str,
+    board_slug: str | None,
+    agent_handle: str | None,
+) -> list[dict[str, Any]]:
+    """Return unanswered questions/tasks directly addressed to the viewer across active boards."""
+    clauses = [
+        "b.archived_at IS NULL",
+        "t.closed_at IS NULL",
+        "p.disabled_at IS NULL",
+        "(p.is_server_owner = 1 OR EXISTS ("
+        "SELECT 1 FROM memberships mb WHERE mb.board_id = m.board_id AND mb.principal_id = m.author_id))",
+        "m.redacted_at IS NULL",
+        "m.author_id != ?",
+        "m.type IN ('question', 'task')",
+        "NOT EXISTS (SELECT 1 FROM messages m2 WHERE m2.supersedes_id = m.id)",
+        """NOT EXISTS (
+            SELECT 1 FROM messages r
+            WHERE r.board_id = m.board_id
+              AND r.thread_id = m.thread_id
+              AND r.seq > m.seq
+              AND r.author_id = ?
+              AND r.redacted_at IS NULL
+        )""",
+    ]
+    params: list[object] = [principal_id, principal_id, principal_id]
+    if board_slug:
+        clauses.append("b.slug = ?")
+        params.append(board_slug)
+    if agent_handle:
+        clauses.append("p.handle = ?")
+        params.append(agent_handle)
+    where_sql = " AND ".join(clauses)
+    rows = conn.execute(
+        f"""
+        SELECT m.id, m.seq, m.type, m.priority, m.body_md, m.created_at, m.thread_id,
+               b.slug AS board_slug, t.title AS thread_title, p.handle AS author_handle
+        FROM messages m
+        JOIN boards b ON b.id = m.board_id
+        JOIN threads t ON t.id = m.thread_id
+        JOIN principals p ON p.id = m.author_id
+        JOIN mentions mn ON mn.message_id = m.id AND mn.principal_id = ? AND mn.role = 'to'
+        WHERE {where_sql}
+        ORDER BY CASE WHEN m.priority = 'urgent' THEN 0 ELSE 1 END, m.created_at DESC, m.seq DESC
+        LIMIT 20
+        """,
+        params,
+    ).fetchall()
+    return [
+        {
+            "id": r["id"],
+            "board_slug": r["board_slug"],
+            "thread_id": r["thread_id"],
+            "thread_title": r["thread_title"],
+            "seq": int(r["seq"]),
+            "author_handle": r["author_handle"],
+            "type": r["type"],
+            "priority": r["priority"] if "priority" in r.keys() and r["priority"] else "normal",
+            "body_preview": _headline(r["body_md"], limit=300),
+            "created_at": r["created_at"],
+            "created_at_local": format_chicago_time(r["created_at"]),
+        }
+        for r in rows
+    ]
+
+
 def _load_feed(
     conn: sqlite3.Connection,
     *,
@@ -707,6 +775,12 @@ def get_monitor_snapshot(
             conn, board_slug=clean_board, agent_handle=clean_agent
         )
         recent_outbox = _load_recent_outbox(conn, board_slug=clean_board, agent_handle=clean_agent)
+        needs_input = _load_needs_input(
+            conn,
+            principal_id=ctx.principal_id,
+            board_slug=clean_board,
+            agent_handle=clean_agent,
+        )
         feed = _load_feed(conn, board_slug=clean_board, agent_handle=clean_agent, limit=limit)
 
     matching_boards = [b for b in boards if not clean_board or b["slug"] == clean_board]
@@ -724,6 +798,7 @@ def get_monitor_snapshot(
         "active_agents": len(active_agents),
         **metrics,
         "open_issues_total": open_issues_total,
+        "needs_input_count": len(needs_input),
         "lagging_agents": lagging_agents,
         "unsubscribed_agents": unsubscribed_agents,
         "failing_or_disabled_webhooks": failing_or_disabled,
@@ -742,6 +817,7 @@ def get_monitor_snapshot(
         "interactions": interactions,
         "open_issues": open_issues,
         "recent_outbox": recent_outbox,
+        "needs_input": needs_input,
         "feed": feed,
         "telemetry": telemetry,
     }

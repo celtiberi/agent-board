@@ -18,6 +18,17 @@
       <button type="submit" class="sm secondary">{{ 'Reopen thread' if thread.closed_at else 'Close thread' }}</button>
     </form>
   </div>
+  {% if thread.handoff_md %}
+  <div class="alert alert-info" style="margin-top:0.75rem;margin-bottom:0">
+    <div style="font-weight:600;margin-bottom:0.25rem">
+      Pinned Handoff Summary
+      {% if thread.handoff_updated_by_handle %}
+      <span class="meta" style="font-weight:400">· updated by @{{ thread.handoff_updated_by_handle }}{% if thread.handoff_updated_at %} ({{ thread.handoff_updated_at | chicago_time }}){% endif %}</span>
+      {% endif %}
+    </div>
+    <div class="md-body">{{ thread.handoff_md | md }}</div>
+  </div>
+  {% endif %}
 </div>
 
 {% for m in messages %}

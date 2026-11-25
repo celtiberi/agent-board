@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import ctypes
+import fcntl
 import json
 import logging
 import os
@@ -66,10 +67,9 @@ def get_unix_peer_uid(sock: socket.socket) -> int:
     raise OSError(f"Peer UID verification is unsupported on platform {sys.platform}")
 
 
-def _verify_private_socket_paths(sock_path: Path) -> None:
-    """Ensure the channel directory and socket path are owned by current UID and not symlinks."""
+def _verify_private_channel_dir(chan_dir: Path) -> None:
+    """Ensure the channel directory exists, is owned by current UID, 0700, and not a symlink."""
     my_uid = os.getuid()
-    chan_dir = sock_path.parent
     if chan_dir.exists() or os.path.islink(chan_dir):
         st = os.lstat(chan_dir)
         if os.path.islink(chan_dir) or not os.path.isdir(chan_dir):
@@ -84,6 +84,39 @@ def _verify_private_socket_paths(sock_path: Path) -> None:
         finally:
             os.umask(old_umask)
 
+
+def _acquire_channel_lock(sock_path: Path) -> int | None:
+    """Acquire non-blocking exclusive flock for this handle's socket; return fd or None if already active."""
+    _verify_private_channel_dir(sock_path.parent)
+    lock_path = sock_path.with_suffix(".lock")
+    my_uid = os.getuid()
+    if os.path.lexists(lock_path):
+        st = os.lstat(lock_path)
+        if os.path.islink(lock_path):
+            raise RuntimeError(f"Refusing symlink at channel lock path: {lock_path}")
+        if st.st_uid != my_uid:
+            raise RuntimeError(f"Refusing channel lock owned by uid {st.st_uid} (expected {my_uid})")
+    flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+    old_umask = os.umask(0o177)
+    try:
+        fd = os.open(str(lock_path), flags, 0o600)
+    finally:
+        os.umask(old_umask)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        os.close(fd)
+        return None
+    except Exception:
+        os.close(fd)
+        raise
+    return fd
+
+
+def _verify_private_socket_paths(sock_path: Path) -> None:
+    """Ensure the channel directory and socket path are owned by current UID and not symlinks."""
+    _verify_private_channel_dir(sock_path.parent)
+    my_uid = os.getuid()
     if os.path.lexists(sock_path):
         st = os.lstat(sock_path)
         if os.path.islink(sock_path):
@@ -267,7 +300,7 @@ async def serve_claude_channel(
     """Run the stdio MCP channel server and local 0600 Unix socket listener."""
     clean_handle = handle.strip().lower()
     sock_path = channel_socket_path(clean_handle, config_dir=config_dir)
-    _verify_private_socket_paths(sock_path)
+    lock_fd = _acquire_channel_lock(sock_path)
     my_uid = os.getuid()
 
     server = Server(
@@ -282,71 +315,92 @@ async def serve_claude_channel(
         experimental_capabilities={"claude/channel": {}},
     )
 
-    async with stdio_server() as (read_stream, write_stream):
-        send_lock = asyncio.Lock()
-        coalescer = EventCoalescer(window_s=coalesce_window_s)
-
-        async def _emit(event: dict[str, Any]) -> None:
-            notif = format_channel_notification(event, handle=clean_handle)
-            async with send_lock:
-                await write_stream.send(SessionMessage(message=notif))
-
-        async def _handle_ipc_client(
-            reader: asyncio.StreamReader,
-            writer: asyncio.StreamWriter,
-        ) -> None:
-            try:
-                peer_sock = writer.get_extra_info("socket")
-                if peer_sock is None:
-                    logger.warning("Dropping channel IPC connection without underlying socket")
-                    return
-                peer_uid = get_unix_peer_uid(peer_sock)
-                if peer_uid != my_uid:
-                    logger.warning("Refusing channel IPC peer uid=%s (expected %s)", peer_uid, my_uid)
-                    return
-
-                chunks: list[bytes] = []
-                total = 0
-                while True:
-                    chunk = await asyncio.wait_for(reader.read(MAX_EVENT_BYTES + 1 - total), timeout=2.0)
-                    if not chunk:
-                        break
-                    chunks.append(chunk)
-                    total += len(chunk)
-                    if b"\n" in chunk or total > MAX_EVENT_BYTES:
-                        break
-                raw = b"".join(chunks)
-                if len(raw) > MAX_EVENT_BYTES:
-                    logger.warning("Dropping oversized channel IPC payload (%d bytes)", len(raw))
-                    return
-                line = raw.split(b"\n", 1)[0].strip()
-                event = parse_channel_event(line)
-                coalescer.submit(event, _emit)
-            except Exception as exc:
-                logger.warning("Ignoring invalid channel IPC event: %s", exc)
-            finally:
-                writer.close()
-                try:
-                    await writer.wait_closed()
-                except Exception:
-                    pass
-
-        old_umask = os.umask(0o177)
-        try:
-            ipc_server = await asyncio.start_unix_server(_handle_ipc_client, path=str(sock_path))
-        finally:
-            os.umask(old_umask)
-        logger.info("Claude channel for @%s listening on %s", clean_handle, sock_path)
-        try:
-            async with ipc_server:
+    try:
+        async with stdio_server() as (read_stream, write_stream):
+            if lock_fd is None:
+                logger.info(
+                    "Claude channel for @%s already active in another process; "
+                    "running passive stdio probe without touching %s",
+                    clean_handle,
+                    sock_path,
+                )
                 await server.run(read_stream, write_stream, init_options)
-        finally:
-            coalescer.cancel_all()
+                return
+
+            _verify_private_socket_paths(sock_path)
+            send_lock = asyncio.Lock()
+            coalescer = EventCoalescer(window_s=coalesce_window_s)
+
+            async def _emit(event: dict[str, Any]) -> None:
+                notif = format_channel_notification(event, handle=clean_handle)
+                async with send_lock:
+                    await write_stream.send(SessionMessage(message=notif))
+
+            async def _handle_ipc_client(
+                reader: asyncio.StreamReader,
+                writer: asyncio.StreamWriter,
+            ) -> None:
+                try:
+                    peer_sock = writer.get_extra_info("socket")
+                    if peer_sock is None:
+                        logger.warning("Dropping channel IPC connection without underlying socket")
+                        return
+                    peer_uid = get_unix_peer_uid(peer_sock)
+                    if peer_uid != my_uid:
+                        logger.warning("Refusing channel IPC peer uid=%s (expected %s)", peer_uid, my_uid)
+                        return
+
+                    chunks: list[bytes] = []
+                    total = 0
+                    while True:
+                        chunk = await asyncio.wait_for(reader.read(MAX_EVENT_BYTES + 1 - total), timeout=2.0)
+                        if not chunk:
+                            break
+                        chunks.append(chunk)
+                        total += len(chunk)
+                        if b"\n" in chunk or total > MAX_EVENT_BYTES:
+                            break
+                    raw = b"".join(chunks)
+                    if len(raw) > MAX_EVENT_BYTES:
+                        logger.warning("Dropping oversized channel IPC payload (%d bytes)", len(raw))
+                        return
+                    line = raw.split(b"\n", 1)[0].strip()
+                    event = parse_channel_event(line)
+                    coalescer.submit(event, _emit)
+                except Exception as exc:
+                    logger.warning("Ignoring invalid channel IPC event: %s", exc)
+                finally:
+                    writer.close()
+                    try:
+                        await writer.wait_closed()
+                    except Exception:
+                        pass
+
+            old_umask = os.umask(0o177)
             try:
-                if os.path.lexists(sock_path) and not os.path.islink(sock_path):
-                    sock_path.unlink()
+                ipc_server = await asyncio.start_unix_server(_handle_ipc_client, path=str(sock_path))
+            finally:
+                os.umask(old_umask)
+            bound_inode = os.lstat(sock_path).st_ino
+            logger.info("Claude channel for @%s listening on %s", clean_handle, sock_path)
+            try:
+                async with ipc_server:
+                    await server.run(read_stream, write_stream, init_options)
+            finally:
+                coalescer.cancel_all()
+                try:
+                    if os.path.lexists(sock_path) and not os.path.islink(sock_path):
+                        if os.lstat(sock_path).st_ino == bound_inode:
+                            sock_path.unlink()
+                except OSError:
+                    pass
+    finally:
+        if lock_fd is not None:
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
             except OSError:
                 pass
+            os.close(lock_fd)
 
 
 def run_claude_channel(handle: str, *, config_dir: Path | None = None) -> int:

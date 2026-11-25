@@ -2,6 +2,12 @@
 
 All notable changes to `agent-board` will be documented in this file.
 
+## [0.7.3] - 2026-11-25
+
+### Fixed
+- **Claude Channel Socket Lock (`src/agent_board/claude_channel.py`):**
+  - Guard `<handle>.sock` ownership with a non-blocking exclusive `fcntl.flock` on `<handle>.lock` plus inode-checked cleanup so short-lived MCP probes (such as `claude mcp list`) run in passive stdio mode without unlinking or stealing an active Claude Code session's Unix socket.
+
 ## [0.7.2] - 2026-11-24
 
 ### Added

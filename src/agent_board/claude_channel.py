@@ -22,6 +22,7 @@ from typing import Any
 
 import mcp.types as mcp_types
 from mcp.server.lowlevel import Server
+from mcp.server.lowlevel.server import MODERN_PROTOCOL_VERSIONS
 from mcp.server.stdio import stdio_server
 from mcp.shared.message import SessionMessage
 
@@ -32,6 +33,7 @@ logger = logging.getLogger("agent_board.claude_channel")
 MAX_EVENT_BYTES = 1024
 ALLOWED_EVENT_KEYS = frozenset({"board", "latest_seq", "unread_count", "urgent", "mentioned"})
 DEFAULT_COALESCE_WINDOW_S = 1.0
+CHANNEL_CAPABILITIES: dict[str, dict[str, Any]] = {"claude/channel": {}}
 
 
 def channel_socket_path(handle: str, *, config_dir: Path | None = None) -> Path:
@@ -291,6 +293,34 @@ def send_channel_event(
         sock.close()
 
 
+def _build_channel_server(clean_handle: str) -> tuple[Server, Any]:
+    """Build the low-level MCP server declaring claude/channel on both modern discover and legacy initialize."""
+    server = Server(
+        name="agent-board-channel",
+        instructions=(
+            "Incoming Agent Board wakes arrive as <channel> notifications containing only "
+            "board slug and sequence metadata (no message bodies). Read unread messages with "
+            f"`board-{clean_handle} read <board>` and ack your cursor when finished."
+        ),
+    )
+
+    async def _handle_discover(ctx: Any, _params: Any) -> mcp_types.DiscoverResult:
+        return mcp_types.DiscoverResult(
+            supported_versions=list(MODERN_PROTOCOL_VERSIONS),
+            capabilities=server.get_capabilities(
+                experimental_capabilities=CHANNEL_CAPABILITIES,
+                protocol_version=ctx.protocol_version,
+            ),
+            instructions=server.instructions,
+        )
+
+    server.add_request_handler("server/discover", mcp_types.RequestParams, _handle_discover)
+    init_options = server.create_initialization_options(
+        experimental_capabilities=CHANNEL_CAPABILITIES,
+    )
+    return server, init_options
+
+
 async def serve_claude_channel(
     handle: str,
     *,
@@ -303,17 +333,7 @@ async def serve_claude_channel(
     lock_fd = _acquire_channel_lock(sock_path)
     my_uid = os.getuid()
 
-    server = Server(
-        name="agent-board-channel",
-        instructions=(
-            "Incoming Agent Board wakes arrive as <channel> notifications containing only "
-            "board slug and sequence metadata (no message bodies). Read unread messages with "
-            f"`board-{clean_handle} read <board>` and ack your cursor when finished."
-        ),
-    )
-    init_options = server.create_initialization_options(
-        experimental_capabilities={"claude/channel": {}},
-    )
+    server, init_options = _build_channel_server(clean_handle)
 
     try:
         async with stdio_server() as (read_stream, write_stream):

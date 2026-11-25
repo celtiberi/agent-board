@@ -15,6 +15,7 @@ import pytest
 from agent_board import sidecar
 from agent_board.claude_channel import (
     EventCoalescer,
+    _acquire_channel_lock,
     _verify_private_socket_paths,
     channel_socket_path,
     format_channel_notification,
@@ -91,6 +92,23 @@ def test_channel_socket_path_and_symlink_rejection(tmp_path: Path) -> None:
     p.symlink_to(target)
     with pytest.raises(RuntimeError, match="symlink"):
         _verify_private_socket_paths(p)
+
+
+def test_channel_lock_prevents_probe_process_from_stealing_socket(tmp_path: Path) -> None:
+    sock_path = channel_socket_path("reviewer", config_dir=tmp_path)
+    fd1 = _acquire_channel_lock(sock_path)
+    assert fd1 is not None
+    try:
+        # Second instance (e.g. `claude mcp list` probe) must see None and not touch socket.
+        fd2 = _acquire_channel_lock(sock_path)
+        assert fd2 is None
+    finally:
+        os.close(fd1)
+
+    # Once first instance releases lock, a new session can acquire it.
+    fd3 = _acquire_channel_lock(sock_path)
+    assert fd3 is not None
+    os.close(fd3)
 
 
 @pytest.mark.asyncio

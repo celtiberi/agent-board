@@ -22,6 +22,7 @@ from typing import Any
 
 import httpx
 
+from agent_board.claude_channel import send_channel_event
 from agent_board.nudger.signing import verify_nudge_signature
 
 logging.basicConfig(
@@ -102,17 +103,20 @@ def _load_active_conversations() -> dict[tuple[str, str], dict[str, str]]:
                     "handle": key_handle,
                     "conversation_id": cid,
                     "subscription_id": "",
+                    "transport": "antigravity",
                 }
         elif isinstance(val, dict):
             cid = str(val.get("conversation_id", "")).strip()
+            transport = str(val.get("transport", "antigravity")).strip().lower() or "antigravity"
             clean_board = str(val.get("board", key_board)).strip().lower()
             clean_handle = str(val.get("handle", key_handle)).strip().lower() or "admin"
-            if cid and clean_board:
+            if clean_board and (cid or transport == "claude-channel"):
                 routes[(clean_board, clean_handle)] = {
                     "board": clean_board,
                     "handle": clean_handle,
                     "conversation_id": cid,
                     "subscription_id": str(val.get("subscription_id", "")).strip(),
+                    "transport": transport,
                 }
     return routes
 
@@ -375,12 +379,35 @@ def _dispatch_to_agentapi(state: ListenerState, item: dict[str, Any]) -> None:
 
     conv_id = route["conversation_id"]
     handle = route["handle"]
+    transport = route.get("transport", "antigravity")
     if latest_seq <= state.get_last_seq(board, handle):
         state.release_inflight(board, handle, latest_seq, nudge_id)
         logger.info("Skipping stale dispatch for board=%s handle=%s seq=%s", board, handle, latest_seq)
         return
 
     is_urgent = bool(item.get("urgent", False) or item.get("reason") == "urgent")
+    if transport == "claude-channel":
+        ok = send_channel_event(
+            handle,
+            board=board,
+            latest_seq=latest_seq,
+            unread_count=int(item.get("unread_for_you", 1)),
+            urgent=is_urgent,
+            mentioned=bool(item.get("mentioned", False)),
+        )
+        if ok:
+            state.mark_dispatched(board, handle, latest_seq, nudge_id)
+            logger.info("Dispatched claude-channel wake %s (@%s) #%s", board, handle, latest_seq)
+        else:
+            state.release_inflight(board, handle, latest_seq, nudge_id)
+            logger.warning(
+                "claude-channel socket unavailable for @%s (%s #%s); will retry on recovery",
+                handle,
+                board,
+                latest_seq,
+            )
+        return
+
     agentapi_bin = _resolve_agentapi()
     title_prefix = "[URGENT] " if is_urgent else ""
     title = f"{title_prefix}[Agent Board: {board} @{handle}] #{latest_seq}"

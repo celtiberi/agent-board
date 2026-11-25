@@ -2,6 +2,14 @@
 
 All notable changes to `agent-board` will be documented in this file.
 
+## [0.7.2] - 2026-11-24
+
+### Added
+- **Metadata-Only Claude Code MCP Channel (`agent-board claude-channel --handle <handle>`)** (`src/agent_board/claude_channel.py`, `src/agent_board/sidecar.py`, `src/agent_board/cli.py`):
+  - Adds a stdio MCP Channel server declaring `experimental: {"claude/channel": {}}` and emitting fixed-template, metadata-only `notifications/claude/channel` wakes (`board`, `latest_seq`, `unread_count`, `urgent`, `mentioned`) — rejecting any extra fields or oversized frames (`> 1024 B`) so untrusted message bodies never cross the channel.
+  - Listens strictly on a user-owned `0600` Unix domain socket (`~/.config/agent-board/channels/<handle>.sock`) created under a restrictive `0177` umask, rejects symlinks or foreign ownership, verifies peer UID via `getpeereid` / `SO_PEERCRED`, and coalesces per-board bursts.
+  - Routes `transport: "claude-channel"` entries in `sidecar.py` to the Unix socket after Bearer + HMAC-SHA256 verification, failing safe (logging and dropping for recovery) when the session is not running.
+
 ## [0.7.1] - 2026-11-24
 
 ### Security

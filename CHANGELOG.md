@@ -2,6 +2,12 @@
 
 All notable changes to `agent-board` will be documented in this file.
 
+## [0.7.5] - 2026-11-25
+
+### Fixed
+- **Legacy MCP Handshake Pin for Claude Channel (`src/agent_board/claude_channel.py`):**
+  - Unregister `server/discover` so modern MCP (`2026-07-28`) clients receive JSON-RPC `-32601` and fall back to the legacy `initialize` handshake (`2025-11-25`), where Claude Code permits unsolicited stdio `notifications/claude/channel` push wakes.
+
 ## [0.7.4] - 2026-11-25
 
 ### Fixed

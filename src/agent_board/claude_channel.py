@@ -21,10 +21,6 @@ from pathlib import Path
 from typing import Any
 
 import mcp.types as mcp_types
-from mcp.server.lowlevel import Server
-from mcp.server.lowlevel.server import MODERN_PROTOCOL_VERSIONS
-from mcp.server.stdio import stdio_server
-from mcp.shared.message import SessionMessage
 
 from agent_board.ids import is_valid_handle, is_valid_slug
 
@@ -34,6 +30,8 @@ MAX_EVENT_BYTES = 1024
 ALLOWED_EVENT_KEYS = frozenset({"board", "latest_seq", "unread_count", "urgent", "mentioned"})
 DEFAULT_COALESCE_WINDOW_S = 1.0
 CHANNEL_CAPABILITIES: dict[str, dict[str, Any]] = {"claude/channel": {}}
+LEGACY_PROTOCOL_VERSION = "2025-11-25"
+SUPPORTED_LEGACY_VERSIONS = frozenset({"2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25"})
 
 
 def channel_socket_path(handle: str, *, config_dir: Path | None = None) -> Path:
@@ -293,32 +291,75 @@ def send_channel_event(
         sock.close()
 
 
-def _build_channel_server(clean_handle: str) -> tuple[Server, Any]:
-    """Build the low-level MCP server declaring claude/channel on both modern discover and legacy initialize."""
-    server = Server(
-        name="agent-board-channel",
-        instructions=(
-            "Incoming Agent Board wakes arrive as <channel> notifications containing only "
-            "board slug and sequence metadata (no message bodies). Read unread messages with "
-            f"`board-{clean_handle} read <board>` and ack your cursor when finished."
-        ),
-    )
+def _handle_jsonrpc_request(msg: dict[str, Any], *, clean_handle: str) -> dict[str, Any] | None:
+    """Handle one legacy-era JSON-RPC 2.0 request for the metadata-only Claude channel server.
 
-    async def _handle_discover(ctx: Any, _params: Any) -> mcp_types.DiscoverResult:
-        return mcp_types.DiscoverResult(
-            supported_versions=list(MODERN_PROTOCOL_VERSIONS),
-            capabilities=server.get_capabilities(
-                experimental_capabilities=CHANNEL_CAPABILITIES,
-                protocol_version=ctx.protocol_version,
-            ),
-            instructions=server.instructions,
-        )
+    Returns a response dict for requests carrying an `id`, or None for notifications.
+    Explicitly returns -32601 (Method not found) for `server/discover` so modern MCP
+    clients fall back to the legacy `initialize` handshake (2025-11-25), where Claude Code
+    permits unsolicited stdio `notifications/claude/channel` push wakes.
+    """
+    if "id" not in msg:
+        return None
+    req_id = msg["id"]
+    method = str(msg.get("method", ""))
+    params = msg.get("params") if isinstance(msg.get("params"), dict) else {}
 
-    server.add_request_handler("server/discover", mcp_types.RequestParams, _handle_discover)
-    init_options = server.create_initialization_options(
-        experimental_capabilities=CHANNEL_CAPABILITIES,
-    )
-    return server, init_options
+    if method == "initialize":
+        requested = str(params.get("protocolVersion", "")).strip()
+        negotiated = requested if requested in SUPPORTED_LEGACY_VERSIONS else LEGACY_PROTOCOL_VERSION
+        return {
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "result": {
+                "protocolVersion": negotiated,
+                "capabilities": {"experimental": CHANNEL_CAPABILITIES},
+                "serverInfo": {"name": "agent-board-channel", "version": "0.7.5"},
+                "instructions": (
+                    "Incoming Agent Board wakes arrive as <channel> notifications containing only "
+                    "board slug and sequence metadata (no message bodies). Read unread messages with "
+                    f"`board-{clean_handle} read <board>` and ack your cursor when finished."
+                ),
+            },
+        }
+    if method == "ping":
+        return {"jsonrpc": "2.0", "id": req_id, "result": {}}
+    if method == "tools/list":
+        return {"jsonrpc": "2.0", "id": req_id, "result": {"tools": []}}
+    if method == "resources/list":
+        return {"jsonrpc": "2.0", "id": req_id, "result": {"resources": []}}
+    if method == "prompts/list":
+        return {"jsonrpc": "2.0", "id": req_id, "result": {"prompts": []}}
+    return {
+        "jsonrpc": "2.0",
+        "id": req_id,
+        "error": {"code": -32601, "message": "Method not found", "data": method},
+    }
+
+
+async def _run_stdio_loop(
+    *,
+    clean_handle: str,
+    write_json: Any,
+) -> None:
+    """Read newline-delimited JSON-RPC 2.0 messages from stdin until EOF."""
+    loop = asyncio.get_running_loop()
+    while True:
+        raw_line = await loop.run_in_executor(None, sys.stdin.buffer.readline)
+        if not raw_line:
+            return
+        text = raw_line.decode("utf-8", errors="replace").strip()
+        if not text:
+            continue
+        try:
+            msg = json.loads(text)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(msg, dict):
+            continue
+        resp = _handle_jsonrpc_request(msg, clean_handle=clean_handle)
+        if resp is not None:
+            await write_json(resp)
 
 
 async def serve_claude_channel(
@@ -332,88 +373,90 @@ async def serve_claude_channel(
     sock_path = channel_socket_path(clean_handle, config_dir=config_dir)
     lock_fd = _acquire_channel_lock(sock_path)
     my_uid = os.getuid()
+    send_lock = asyncio.Lock()
 
-    server, init_options = _build_channel_server(clean_handle)
+    async def _write_json(payload: dict[str, Any]) -> None:
+        line = (json.dumps(payload, separators=(",", ":")) + "\n").encode("utf-8")
+        async with send_lock:
+            sys.stdout.buffer.write(line)
+            sys.stdout.buffer.flush()
 
     try:
-        async with stdio_server() as (read_stream, write_stream):
-            if lock_fd is None:
-                logger.info(
-                    "Claude channel for @%s already active in another process; "
-                    "running passive stdio probe without touching %s",
-                    clean_handle,
-                    sock_path,
-                )
-                await server.run(read_stream, write_stream, init_options)
-                return
+        if lock_fd is None:
+            logger.info(
+                "Claude channel for @%s already active in another process; "
+                "running passive stdio probe without touching %s",
+                clean_handle,
+                sock_path,
+            )
+            await _run_stdio_loop(clean_handle=clean_handle, write_json=_write_json)
+            return
 
-            _verify_private_socket_paths(sock_path)
-            send_lock = asyncio.Lock()
-            coalescer = EventCoalescer(window_s=coalesce_window_s)
+        _verify_private_socket_paths(sock_path)
+        coalescer = EventCoalescer(window_s=coalesce_window_s)
 
-            async def _emit(event: dict[str, Any]) -> None:
-                notif = format_channel_notification(event, handle=clean_handle)
-                async with send_lock:
-                    await write_stream.send(SessionMessage(message=notif))
+        async def _emit(event: dict[str, Any]) -> None:
+            notif = format_channel_notification(event, handle=clean_handle)
+            await _write_json(notif.model_dump(by_alias=True, exclude_none=True))
 
-            async def _handle_ipc_client(
-                reader: asyncio.StreamReader,
-                writer: asyncio.StreamWriter,
-            ) -> None:
-                try:
-                    peer_sock = writer.get_extra_info("socket")
-                    if peer_sock is None:
-                        logger.warning("Dropping channel IPC connection without underlying socket")
-                        return
-                    peer_uid = get_unix_peer_uid(peer_sock)
-                    if peer_uid != my_uid:
-                        logger.warning("Refusing channel IPC peer uid=%s (expected %s)", peer_uid, my_uid)
-                        return
-
-                    chunks: list[bytes] = []
-                    total = 0
-                    while True:
-                        chunk = await asyncio.wait_for(reader.read(MAX_EVENT_BYTES + 1 - total), timeout=2.0)
-                        if not chunk:
-                            break
-                        chunks.append(chunk)
-                        total += len(chunk)
-                        if b"\n" in chunk or total > MAX_EVENT_BYTES:
-                            break
-                    raw = b"".join(chunks)
-                    if len(raw) > MAX_EVENT_BYTES:
-                        logger.warning("Dropping oversized channel IPC payload (%d bytes)", len(raw))
-                        return
-                    line = raw.split(b"\n", 1)[0].strip()
-                    event = parse_channel_event(line)
-                    coalescer.submit(event, _emit)
-                except Exception as exc:
-                    logger.warning("Ignoring invalid channel IPC event: %s", exc)
-                finally:
-                    writer.close()
-                    try:
-                        await writer.wait_closed()
-                    except Exception:
-                        pass
-
-            old_umask = os.umask(0o177)
+        async def _handle_ipc_client(
+            reader: asyncio.StreamReader,
+            writer: asyncio.StreamWriter,
+        ) -> None:
             try:
-                ipc_server = await asyncio.start_unix_server(_handle_ipc_client, path=str(sock_path))
+                peer_sock = writer.get_extra_info("socket")
+                if peer_sock is None:
+                    logger.warning("Dropping channel IPC connection without underlying socket")
+                    return
+                peer_uid = get_unix_peer_uid(peer_sock)
+                if peer_uid != my_uid:
+                    logger.warning("Refusing channel IPC peer uid=%s (expected %s)", peer_uid, my_uid)
+                    return
+
+                chunks: list[bytes] = []
+                total = 0
+                while True:
+                    chunk = await asyncio.wait_for(reader.read(MAX_EVENT_BYTES + 1 - total), timeout=2.0)
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                    total += len(chunk)
+                    if b"\n" in chunk or total > MAX_EVENT_BYTES:
+                        break
+                raw = b"".join(chunks)
+                if len(raw) > MAX_EVENT_BYTES:
+                    logger.warning("Dropping oversized channel IPC payload (%d bytes)", len(raw))
+                    return
+                line = raw.split(b"\n", 1)[0].strip()
+                event = parse_channel_event(line)
+                coalescer.submit(event, _emit)
+            except Exception as exc:
+                logger.warning("Ignoring invalid channel IPC event: %s", exc)
             finally:
-                os.umask(old_umask)
-            bound_inode = os.lstat(sock_path).st_ino
-            logger.info("Claude channel for @%s listening on %s", clean_handle, sock_path)
-            try:
-                async with ipc_server:
-                    await server.run(read_stream, write_stream, init_options)
-            finally:
-                coalescer.cancel_all()
+                writer.close()
                 try:
-                    if os.path.lexists(sock_path) and not os.path.islink(sock_path):
-                        if os.lstat(sock_path).st_ino == bound_inode:
-                            sock_path.unlink()
-                except OSError:
+                    await writer.wait_closed()
+                except Exception:
                     pass
+
+        old_umask = os.umask(0o177)
+        try:
+            ipc_server = await asyncio.start_unix_server(_handle_ipc_client, path=str(sock_path))
+        finally:
+            os.umask(old_umask)
+        bound_inode = os.lstat(sock_path).st_ino
+        logger.info("Claude channel for @%s listening on %s", clean_handle, sock_path)
+        try:
+            async with ipc_server:
+                await _run_stdio_loop(clean_handle=clean_handle, write_json=_write_json)
+        finally:
+            coalescer.cancel_all()
+            try:
+                if os.path.lexists(sock_path) and not os.path.islink(sock_path):
+                    if os.lstat(sock_path).st_ino == bound_inode:
+                        sock_path.unlink()
+            except OSError:
+                pass
     finally:
         if lock_fd is not None:
             try:

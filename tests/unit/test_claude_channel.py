@@ -231,10 +231,9 @@ async def test_unix_socket_peer_uid_and_sidecar_dispatch(tmp_path: Path, monkeyp
 
 
 @pytest.mark.asyncio
-async def test_channel_declares_capability_in_both_modern_discover_and_legacy_initialize() -> None:
-    """Both MCP 2026-07-28 server/discover and legacy initialize must advertise experimental.claude/channel."""
+async def test_channel_falls_back_to_legacy_handshake_and_emits_unsolicited_wake() -> None:
+    """server/discover must return -32601 so Claude Code falls back to legacy initialize with claude/channel."""
     with tempfile.TemporaryDirectory(dir="/tmp", prefix="ab-disc-") as short_dir:
-        # 1. Modern protocol (2026-07-28): server/discover without prior initialize.
         from mcp.client.session import (
             CLIENT_CAPABILITIES_META_KEY,
             CLIENT_INFO_META_KEY,
@@ -259,6 +258,7 @@ async def test_channel_declares_capability_in_both_modern_discover_and_legacy_in
         )
         assert proc.stdin and proc.stdout
         try:
+            # 1. Modern server/discover probe returns -32601 Method not found.
             proc.stdin.write(
                 (
                     json.dumps(
@@ -281,30 +281,18 @@ async def test_channel_declares_capability_in_both_modern_discover_and_legacy_in
             await proc.stdin.drain()
             raw_discover = await asyncio.wait_for(proc.stdout.readline(), timeout=5.0)
             discover_resp = json.loads(raw_discover.decode("utf-8"))
-            caps = discover_resp["result"]["capabilities"]
-            assert caps["experimental"]["claude/channel"] == {}
-        finally:
-            proc.terminate()
-            await proc.wait()
+            assert discover_resp["error"]["code"] == -32601
 
-        # 2. Legacy protocol (2024-11-05): initialize handshake.
-        proc2 = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        assert proc2.stdin and proc2.stdout
-        try:
-            proc2.stdin.write(
+            # 2. Client falls back to legacy initialize (2025-11-25) and receives experimental.claude/channel.
+            proc.stdin.write(
                 (
                     json.dumps(
                         {
                             "jsonrpc": "2.0",
-                            "id": 1,
+                            "id": 2,
                             "method": "initialize",
                             "params": {
-                                "protocolVersion": "2024-11-05",
+                                "protocolVersion": "2025-11-25",
                                 "capabilities": {},
                                 "clientInfo": {"name": "test", "version": "1.0"},
                             },
@@ -313,11 +301,33 @@ async def test_channel_declares_capability_in_both_modern_discover_and_legacy_in
                     + "\n"
                 ).encode("utf-8")
             )
-            await proc2.stdin.drain()
-            raw_init = await asyncio.wait_for(proc2.stdout.readline(), timeout=5.0)
+            await proc.stdin.drain()
+            raw_init = await asyncio.wait_for(proc.stdout.readline(), timeout=5.0)
             init_resp = json.loads(raw_init.decode("utf-8"))
-            caps2 = init_resp["result"]["capabilities"]
-            assert caps2["experimental"]["claude/channel"] == {}
+            assert init_resp["result"]["protocolVersion"] == "2025-11-25"
+            assert init_resp["result"]["capabilities"]["experimental"]["claude/channel"] == {}
+
+            proc.stdin.write((json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}) + "\n").encode())
+            await proc.stdin.drain()
+            await asyncio.sleep(0.1)
+
+            # 3. Socket wake emits unsolicited notifications/claude/channel on stdout.
+            sock_path = channel_socket_path("reviewer", config_dir=Path(short_dir))
+            ok = await asyncio.to_thread(
+                send_channel_event,
+                "reviewer",
+                board="alpha",
+                latest_seq=99,
+                unread_count=1,
+                urgent=True,
+                mentioned=True,
+                socket_path=sock_path,
+            )
+            assert ok is True
+            raw_notif = await asyncio.wait_for(proc.stdout.readline(), timeout=5.0)
+            notif = json.loads(raw_notif.decode("utf-8"))
+            assert notif["method"] == "notifications/claude/channel"
+            assert notif["params"]["meta"]["latest_seq"] == "99"
         finally:
-            proc2.terminate()
-            await proc2.wait()
+            proc.terminate()
+            await proc.wait()

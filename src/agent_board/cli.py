@@ -313,3 +313,18 @@ def admin_bot_cmd(
         typer.echo(f"Processed {processed} message(s).")
         return
     raise SystemExit(run_admin_bot(cfg))
+
+
+@admin_app.command("claude-channel")
+def claude_channel_cmd(
+    handle: str = typer.Option(..., "--handle", help="Agent handle receiving metadata-only wakes."),
+    config_dir: Path | None = typer.Option(
+        None,
+        "--config-dir",
+        help="Optional Agent Board config directory override (defaults to ~/.config/agent-board).",
+    ),
+) -> None:
+    """Run a stdio Claude Code MCP Channel listener backed by a 0600 Unix domain socket."""
+    from agent_board.claude_channel import run_claude_channel
+
+    raise SystemExit(run_claude_channel(handle, config_dir=config_dir))

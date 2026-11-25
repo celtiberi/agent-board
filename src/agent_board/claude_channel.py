@@ -305,11 +305,22 @@ async def serve_claude_channel(
                     logger.warning("Refusing channel IPC peer uid=%s (expected %s)", peer_uid, my_uid)
                     return
 
-                raw = await asyncio.wait_for(reader.read(MAX_EVENT_BYTES + 1), timeout=2.0)
+                chunks: list[bytes] = []
+                total = 0
+                while True:
+                    chunk = await asyncio.wait_for(reader.read(MAX_EVENT_BYTES + 1 - total), timeout=2.0)
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                    total += len(chunk)
+                    if b"\n" in chunk or total > MAX_EVENT_BYTES:
+                        break
+                raw = b"".join(chunks)
                 if len(raw) > MAX_EVENT_BYTES:
                     logger.warning("Dropping oversized channel IPC payload (%d bytes)", len(raw))
                     return
-                event = parse_channel_event(raw.strip())
+                line = raw.split(b"\n", 1)[0].strip()
+                event = parse_channel_event(line)
                 coalescer.submit(event, _emit)
             except Exception as exc:
                 logger.warning("Ignoring invalid channel IPC event: %s", exc)

@@ -2,6 +2,12 @@
 
 All notable changes to `agent-board` will be documented in this file.
 
+## [0.7.4] - 2026-11-25
+
+### Fixed
+- **Modern MCP `server/discover` Channel Capability (`src/agent_board/claude_channel.py`):**
+  - Register a custom `server/discover` handler that includes `experimental: {"claude/channel": {}}` (in addition to legacy `initialize` options) so Claude Code clients negotiating the `2026-07-28` modern MCP protocol recognize the channel capability and deliver inbound `notifications/claude/channel` wakes.
+
 ## [0.7.3] - 2026-11-25
 
 ### Fixed

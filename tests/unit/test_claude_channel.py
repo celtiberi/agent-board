@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import stat
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -227,3 +228,96 @@ async def test_unix_socket_peer_uid_and_sidecar_dispatch(tmp_path: Path, monkeyp
             await server.wait_closed()
             if sock_path.exists():
                 sock_path.unlink()
+
+
+@pytest.mark.asyncio
+async def test_channel_declares_capability_in_both_modern_discover_and_legacy_initialize() -> None:
+    """Both MCP 2026-07-28 server/discover and legacy initialize must advertise experimental.claude/channel."""
+    with tempfile.TemporaryDirectory(dir="/tmp", prefix="ab-disc-") as short_dir:
+        # 1. Modern protocol (2026-07-28): server/discover without prior initialize.
+        from mcp.client.session import (
+            CLIENT_CAPABILITIES_META_KEY,
+            CLIENT_INFO_META_KEY,
+            PROTOCOL_VERSION_META_KEY,
+        )
+        from mcp.server.lowlevel.server import MODERN_PROTOCOL_VERSIONS
+
+        cmd = [
+            sys.executable,
+            "-c",
+            (
+                "from pathlib import Path; "
+                "from agent_board.claude_channel import run_claude_channel; "
+                f"run_claude_channel('reviewer', config_dir=Path({short_dir!r}))"
+            ),
+        ]
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        assert proc.stdin and proc.stdout
+        try:
+            proc.stdin.write(
+                (
+                    json.dumps(
+                        {
+                            "jsonrpc": "2.0",
+                            "id": 1,
+                            "method": "server/discover",
+                            "params": {
+                                "_meta": {
+                                    PROTOCOL_VERSION_META_KEY: MODERN_PROTOCOL_VERSIONS[0],
+                                    CLIENT_INFO_META_KEY: {"name": "test", "version": "1.0"},
+                                    CLIENT_CAPABILITIES_META_KEY: {},
+                                }
+                            },
+                        }
+                    )
+                    + "\n"
+                ).encode("utf-8")
+            )
+            await proc.stdin.drain()
+            raw_discover = await asyncio.wait_for(proc.stdout.readline(), timeout=5.0)
+            discover_resp = json.loads(raw_discover.decode("utf-8"))
+            caps = discover_resp["result"]["capabilities"]
+            assert caps["experimental"]["claude/channel"] == {}
+        finally:
+            proc.terminate()
+            await proc.wait()
+
+        # 2. Legacy protocol (2024-11-05): initialize handshake.
+        proc2 = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        assert proc2.stdin and proc2.stdout
+        try:
+            proc2.stdin.write(
+                (
+                    json.dumps(
+                        {
+                            "jsonrpc": "2.0",
+                            "id": 1,
+                            "method": "initialize",
+                            "params": {
+                                "protocolVersion": "2024-11-05",
+                                "capabilities": {},
+                                "clientInfo": {"name": "test", "version": "1.0"},
+                            },
+                        }
+                    )
+                    + "\n"
+                ).encode("utf-8")
+            )
+            await proc2.stdin.drain()
+            raw_init = await asyncio.wait_for(proc2.stdout.readline(), timeout=5.0)
+            init_resp = json.loads(raw_init.decode("utf-8"))
+            caps2 = init_resp["result"]["capabilities"]
+            assert caps2["experimental"]["claude/channel"] == {}
+        finally:
+            proc2.terminate()
+            await proc2.wait()
